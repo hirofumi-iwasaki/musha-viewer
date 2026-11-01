@@ -1,0 +1,6 @@
+#!/bin/sh
+# Run a command in the viewer-only development container.
+set -eu
+[ "$#" -gt 0 ] || { echo 'Usage: scripts/cloud-run COMMAND [ARG ...]' >&2; exit 2; }
+exec env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH \
+  docker --host=unix:///var/run/docker.sock exec -w /project musha-viewer-dev "$@"
