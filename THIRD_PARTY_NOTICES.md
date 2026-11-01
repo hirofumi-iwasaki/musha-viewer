@@ -59,3 +59,5 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
+
+Additional direct dependencies: `desktop_drop` 0.7.1 (Apache-2.0), `ffi` 2.2.0 (BSD 3-Clause), `path_provider` 2.1.6 (BSD 3-Clause), `window_manager` 0.5.2 (MIT), `screen_retriever` 0.2.2 (MIT), and `c2pa` / c2pa-rs 0.91.7 (MIT OR Apache-2.0). Exact Dart and Rust transitive versions are recorded in `pubspec.lock` and `native/c2pa/Cargo.lock`; each retains its own license. Distributors must review and include applicable notices for the resolved native dependencies and any system libraries before redistribution; the Flutter license registry does not cover Rust dependencies.

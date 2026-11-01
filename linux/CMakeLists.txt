@@ -75,6 +75,15 @@ set_target_properties(${BINARY_NAME}
 include(flutter/generated_plugins.cmake)
 
 
+# Build the offline C2PA verifier and install it alongside the Flutter engine.
+set(C2PA_LIBRARY "${CMAKE_CURRENT_SOURCE_DIR}/../native/c2pa/target/release/libmusha_c2pa.so")
+add_custom_target(c2pa_native ALL
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/build-c2pa.sh"
+  BYPRODUCTS "${C2PA_LIBRARY}"
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+  VERBATIM)
+add_dependencies(${BINARY_NAME} c2pa_native)
+
 # === Installation ===
 # By default, "installing" just makes a relocatable bundle in the build
 # directory.
@@ -96,6 +105,8 @@ install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
 
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime)
+
+install(FILES "${C2PA_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime)
 
 install(FILES "${FLUTTER_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)

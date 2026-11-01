@@ -1,219 +1,300 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
-import 'dart:ui' as ui;
+import 'dart:ui' show AppExitResponse;
 
-import 'package:exif/exif.dart';
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
-void main() => runApp(const ViewerApp());
+import 'package:screen_retriever/screen_retriever.dart';
+import 'package:window_manager/window_manager.dart';
 
-class MetadataEntry {
-  const MetadataEntry(this.group, this.key, this.value);
-  final String group;
-  final String key;
-  final String value;
-}
+import 'settings.dart';
+import 'viewer_controller.dart';
+export 'viewer_controller.dart';
 
-/// Reads a bounded snapshot. The source file is never opened for writing.
-class ViewerService {
-  static const maxBytes = 64 * 1024 * 1024;
-  static const maxPixels = 40 * 1000 * 1000;
-
-  Future<List<MetadataEntry>> fileInfo(String path) async {
-    final stat = await File(path).stat();
-    if (stat.type != FileSystemEntityType.file) {
-      throw const FileSystemException('Not a regular file');
-    }
-    return [
-      MetadataEntry('File', 'Name', path.split(Platform.pathSeparator).last),
-      MetadataEntry('File', 'Size', '${stat.size} bytes'),
-      MetadataEntry('File', 'Modified', stat.modified.toLocal().toString()),
-    ];
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  SettingsStore settings;
+  try {
+    settings = SettingsStore(await settingsFile());
+    await settings.load();
+  } catch (error) {
+    settings = SettingsStore(
+      File(
+        '${Directory.systemTemp.path}/musha-viewer-unavailable-settings.json',
+      ),
+    );
+    settings.writable = false;
+    settings.warning = 'Settings are unavailable: $error';
   }
-
-  Future<Uint8List> read(String path) async {
-    final builder = BytesBuilder(copy: false);
-    var total = 0;
-    await for (final chunk in File(path).openRead()) {
-      total += chunk.length;
-      if (total > maxBytes) {
-        throw const FormatException('File exceeds the 64 MiB reading limit');
-      }
-      builder.add(chunk);
-    }
-    return builder.takeBytes();
-  }
-
-  Future<List<MetadataEntry>> exif(Uint8List bytes) =>
-      compute(_extractExif, bytes);
-}
-
-Future<List<MetadataEntry>> _extractExif(Uint8List bytes) async {
-  final tags = await readExifFromBytes(bytes);
-  return [
-    for (final tag in tags.entries)
-      MetadataEntry('EXIF', tag.key, tag.value.printable),
-  ];
-}
-
-class ViewerController extends ChangeNotifier {
-  ViewerController(this.service);
-  final ViewerService service;
-  int _session = 0;
-  bool _disposed = false;
-  String? name;
-  Uint8List? bytes;
-  List<MetadataEntry> fileEntries = [], exifEntries = [], imageEntries = [];
-  String? fileError, previewError, exifStatus;
-  bool loading = false;
-
-  bool _current(int id) => !_disposed && id == _session;
-  void _update(int id, void Function() change) {
-    if (_current(id)) {
-      change();
-      notifyListeners();
-    }
-  }
-
-  Future<void> open(String path) async {
-    final id = ++_session;
-    name = path.split(Platform.pathSeparator).last;
-    bytes = null;
-    fileEntries = [];
-    exifEntries = [];
-    imageEntries = [];
-    fileError = null;
-    previewError = null;
-    exifStatus = 'Reading EXIF…';
-    loading = true;
-    notifyListeners();
-    final info = service
-        .fileInfo(path)
-        .then(
-          (value) {
-            _update(id, () => fileEntries = value);
-          },
-          onError: (Object error) {
-            _update(
-              id,
-              () => fileError = 'File information unavailable: $error',
-            );
-          },
-        );
-    try {
-      final data = await service.read(path);
-      if (!_current(id)) return;
-      final metadata = service
-          .exif(data)
-          .then(
-            (value) {
-              _update(id, () {
-                exifEntries = value;
-                exifStatus = value.isEmpty
-                    ? 'No EXIF tags returned by the parser.'
-                    : null;
-              });
-            },
-            onError: (Object error) {
-              _update(id, () => exifStatus = 'EXIF could not be read: $error');
-            },
-          );
+  var windowReady = false;
+  try {
+    await windowManager.ensureInitialized();
+    await windowManager.setPreventClose(true);
+    windowReady = true;
+    await restoreWindow(settings.value);
+  } catch (error) {
+    settings.warning = 'Window restoration unavailable: $error';
+    if (windowReady) {
       try {
-        final buffer = await ui.ImmutableBuffer.fromUint8List(data);
-        try {
-          final descriptor = await ui.ImageDescriptor.encoded(buffer);
-          try {
-            if (descriptor.width * descriptor.height >
-                ViewerService.maxPixels) {
-              throw const FormatException(
-                'Image exceeds the 40 megapixel preview limit',
-              );
-            }
-          } finally {
-            descriptor.dispose();
-          }
-        } finally {
-          buffer.dispose();
-        }
-        if (!_current(id)) return;
-        final codec = await ui.instantiateImageCodec(data);
-        try {
-          final frame = await codec.getNextFrame();
-          final width = frame.image.width, height = frame.image.height;
-          frame.image.dispose();
-          _update(id, () {
-            bytes = data;
-            imageEntries = [
-              MetadataEntry(
-                'Image',
-                'Decoded dimensions',
-                '$width × $height pixels',
-              ),
-            ];
-            loading = false;
-          });
-        } finally {
-          codec.dispose();
-        }
-      } catch (error) {
-        _update(id, () {
-          previewError = 'Image preview unavailable: $error';
-          loading = false;
-        });
-      }
-      await metadata;
-    } catch (error) {
-      _update(id, () {
-        previewError = 'Could not read image: $error';
-        exifStatus = 'EXIF unavailable because the file could not be read.';
-        loading = false;
-      });
+        await windowManager.show();
+      } catch (_) {}
     }
-    await info;
+  }
+  runApp(ViewerApp(settings: settings, windowReady: windowReady));
+}
+
+Future<void> restoreWindow(ViewerSettings settings) async {
+  final displays = await screenRetriever.getAllDisplays();
+  if (displays.isNotEmpty) {
+    final requested = Rect.fromLTWH(
+      settings.x ?? 0,
+      settings.y ?? 0,
+      settings.width,
+      settings.height,
+    );
+    final display =
+        displays
+            .where(
+              (d) =>
+                  (Offset(
+                            d.visiblePosition?.dx ?? 0,
+                            d.visiblePosition?.dy ?? 0,
+                          ) &
+                          (d.visibleSize ?? d.size))
+                      .overlaps(requested),
+            )
+            .firstOrNull ??
+        displays.first;
+    final area =
+        (display.visiblePosition ?? Offset.zero) &
+        (display.visibleSize ?? display.size);
+    final w = settings.width.clamp(
+          area.width < 320 ? area.width : 320.0,
+          area.width,
+        ),
+        h = settings.height.clamp(
+          area.height < 240 ? area.height : 240.0,
+          area.height,
+        );
+    final x = (settings.x ?? area.left).clamp(area.left, area.right - w),
+        y = (settings.y ?? area.top).clamp(area.top, area.bottom - h);
+    await windowManager.setBounds(Rect.fromLTWH(x, y, w, h));
+  }
+  if (settings.maximized) await windowManager.maximize();
+  await windowManager.show();
+}
+
+Future<void> flushWindowSettings(
+  Future<void> pending,
+  Future<void> Function() saveWindow,
+  Future<void> Function() flush,
+) async {
+  try {
+    await pending;
+    await saveWindow();
+  } catch (error) {
+    debugPrint('Could not capture window settings: $error');
+  }
+  try {
+    await flush();
+  } catch (error) {
+    debugPrint('Could not save settings: $error');
+  }
+}
+
+AppLifecycleListener registerExitHandler(Future<void> Function() prepare) =>
+    AppLifecycleListener(
+      onExitRequested: () async {
+        await prepare();
+        return AppExitResponse.exit;
+      },
+    );
+
+class ViewerApp extends StatefulWidget {
+  const ViewerApp({super.key, this.settings, this.windowReady = false});
+  final SettingsStore? settings;
+  final bool windowReady;
+  @override
+  State<ViewerApp> createState() => _ViewerAppState();
+}
+
+class _ViewerAppState extends State<ViewerApp> with WindowListener {
+  late final SettingsStore settings =
+      widget.settings ??
+      SettingsStore(File('/tmp/musha-viewer-test-settings.json'));
+  late final ViewerController controller = ViewerController(ViewerService());
+  AppLifecycleListener? lifecycle;
+  bool closing = false;
+  Future<void> windowUpdates = Future.value();
+  @override
+  void initState() {
+    super.initState();
+    if (widget.windowReady) {
+      windowManager.addListener(this);
+      lifecycle = registerExitHandler(prepareForQuit);
+    }
+  }
+
+  Future<void> saveWindow() async {
+    final maximized = await windowManager.isMaximized();
+    settings.value.maximized = maximized;
+    if (!maximized && !await windowManager.isFullScreen()) {
+      final bounds = await windowManager.getBounds();
+      settings.value.width = bounds.width;
+      settings.value.height = bounds.height;
+      settings.value.x = bounds.left;
+      settings.value.y = bounds.top;
+    }
+    settings.changed();
+  }
+
+  void scheduleWindowSave() {
+    if (closing) return;
+    windowUpdates = windowUpdates.then((_) async {
+      try {
+        await saveWindow();
+      } catch (error) {
+        settings.reportWarning('Window settings unavailable: $error');
+      }
+    });
+  }
+
+  @override
+  void onWindowMoved() => scheduleWindowSave();
+  @override
+  void onWindowResized() => scheduleWindowSave();
+  @override
+  void onWindowMaximize() => scheduleWindowSave();
+  @override
+  void onWindowUnmaximize() => scheduleWindowSave();
+  @override
+  void onWindowClose() {
+    if (!closing) {
+      closing = true;
+      unawaited(_close());
+    }
+  }
+
+  Future<void> prepareForQuit() async {
+    closing = true;
+    await flushWindowSettings(windowUpdates, saveWindow, settings.flush);
+  }
+
+  Future<void> _close() async {
+    try {
+      await prepareForQuit();
+    } finally {
+      await windowManager.destroy();
+    }
   }
 
   @override
   void dispose() {
-    _disposed = true;
-    _session++;
+    if (widget.windowReady) {
+      windowManager.removeListener(this);
+      lifecycle?.dispose();
+    }
+    settings.dispose();
     super.dispose();
   }
-}
 
-class ViewerApp extends StatelessWidget {
-  const ViewerApp({super.key});
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    title: 'musha-viewer',
-    theme: ThemeData(
-      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff526984)),
-      useMaterial3: true,
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: settings,
+    builder: (context, _) => MaterialApp(
+      title: 'musha-viewer',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff526984)),
+        useMaterial3: true,
+      ),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xff526984),
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
+      ),
+      themeMode: settings.value.theme,
+      home: ViewerScreen(controller: controller, settings: settings),
     ),
-    home: ViewerScreen(controller: ViewerController(ViewerService())),
   );
 }
 
 class ViewerScreen extends StatefulWidget {
-  const ViewerScreen({super.key, required this.controller});
+  const ViewerScreen({super.key, required this.controller, this.settings});
   final ViewerController controller;
+  final SettingsStore? settings;
   @override
   State<ViewerScreen> createState() => _ViewerScreenState();
 }
 
+String? dropRejection(List<DropItem> files) =>
+    files.length != 1 || files.single is DropItemDirectory
+    ? 'Drop one image file; folders and multiple files are not supported.'
+    : null;
+
 class _ViewerScreenState extends State<ViewerScreen> {
   final transformation = TransformationController();
   bool picking = false;
+  bool dragging = false;
+  int selection = 0;
+  late final SettingsStore settings =
+      widget.settings ??
+      SettingsStore(File('/tmp/musha-viewer-test-settings.json'));
+  Future<void> dropped(List<DropItem> files) async {
+    final request = ++selection;
+    final rejection = dropRejection(files);
+    if (rejection != null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(rejection)));
+      }
+      return;
+    }
+    final item = files.single;
+    final bookmark = item.extraAppleBookmark;
+    var scoped = false;
+    try {
+      if (Platform.isMacOS && bookmark != null && bookmark.isNotEmpty) {
+        scoped = await DesktopDrop.instance
+            .startAccessingSecurityScopedResource(bookmark: bookmark);
+        if (!scoped) {
+          throw StateError(
+            'Permission to read the dropped file was not granted',
+          );
+        }
+      }
+      if (!mounted || request != selection) return;
+      transformation.value = Matrix4.identity();
+      await widget.controller.open(item.path);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open dropped file: $error')),
+        );
+      }
+    } finally {
+      if (scoped) {
+        await DesktopDrop.instance.stopAccessingSecurityScopedResource(
+          bookmark: bookmark!,
+        );
+      }
+    }
+  }
+
   @override
   void dispose() {
+    if (widget.settings == null) settings.dispose();
     transformation.dispose();
     widget.controller.dispose();
     super.dispose();
   }
 
   Future<void> pick() async {
+    final request = ++selection;
     setState(() => picking = true);
     try {
       const images = XTypeGroup(
@@ -231,7 +312,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
         ],
       );
       final file = await openFile(acceptedTypeGroups: [images]);
-      if (file != null && mounted) {
+      if (file != null && mounted && request == selection) {
         transformation.value = Matrix4.identity();
         unawaited(widget.controller.open(file.path));
       }
@@ -263,30 +344,103 @@ class _ViewerScreenState extends State<ViewerScreen> {
               icon: const Icon(Icons.folder_open),
               label: const Text('Open image'),
             ),
+            IconButton(
+              tooltip: 'Toggle inspector',
+              onPressed: () {
+                settings.value.inspectorVisible =
+                    !settings.value.inspectorVisible;
+                settings.changed();
+              },
+              icon: const Icon(Icons.view_sidebar),
+            ),
+            PopupMenuButton<ThemeMode>(
+              tooltip: 'Appearance',
+              onSelected: (theme) {
+                settings.value.theme = theme;
+                settings.changed();
+              },
+              itemBuilder: (_) => [
+                for (final mode in ThemeMode.values)
+                  PopupMenuItem(value: mode, child: Text(mode.name)),
+              ],
+            ),
             const SizedBox(width: 12),
           ],
         ),
-        body: LayoutBuilder(
-          builder: (context, constraints) {
-            final preview = _preview(c);
-            final inspector = _inspector(c);
-            return constraints.maxWidth < 650
-                ? Column(
-                    children: [
-                      Expanded(child: preview),
-                      SizedBox(
-                        height: constraints.maxHeight * .42,
-                        child: inspector,
-                      ),
-                    ],
-                  )
-                : Row(
-                    children: [
-                      Expanded(child: preview),
-                      SizedBox(width: 340, child: inspector),
-                    ],
-                  );
+        body: DropTarget(
+          onDragEntered: (_) => setState(() => dragging = true),
+          onDragExited: (_) => setState(() => dragging = false),
+          onDragDone: (details) {
+            setState(() => dragging = false);
+            unawaited(dropped(details.files));
           },
+          child: Stack(
+            children: [
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final preview = _preview(c);
+                  final inspector = _inspector(c);
+                  if (!settings.value.inspectorVisible) return preview;
+                  return constraints.maxWidth < 650
+                      ? Column(
+                          children: [
+                            Expanded(child: preview),
+                            SizedBox(
+                              height: constraints.maxHeight * .42,
+                              child: inspector,
+                            ),
+                          ],
+                        )
+                      : Row(
+                          children: [
+                            Expanded(child: preview),
+                            MouseRegion(
+                              cursor: SystemMouseCursors.resizeColumn,
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onHorizontalDragUpdate: (details) {
+                                  setState(() {
+                                    settings.value.inspectorWidth =
+                                        (settings.value.inspectorWidth -
+                                                details.delta.dx)
+                                            .clamp(
+                                              240,
+                                              (constraints.maxWidth - 200)
+                                                  .clamp(240, 1000),
+                                            );
+                                    settings.changed();
+                                  });
+                                },
+                                child: const SizedBox(width: 8),
+                              ),
+                            ),
+                            SizedBox(
+                              width: settings.value.inspectorWidth.clamp(
+                                240,
+                                constraints.maxWidth - 200,
+                              ),
+                              child: inspector,
+                            ),
+                          ],
+                        );
+                },
+              ),
+              if (dragging)
+                const Positioned.fill(
+                  child: IgnorePointer(
+                    child: ColoredBox(
+                      color: Color(0x88526984),
+                      child: Center(
+                        child: Text(
+                          'Drop one image',
+                          style: TextStyle(color: Colors.white, fontSize: 28),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
       );
     },
@@ -356,7 +510,55 @@ class _ViewerScreenState extends State<ViewerScreen> {
               'Content Credentials (C2PA)',
               style: Theme.of(context).textTheme.titleSmall,
             ),
-            const Text('Verification unavailable in this version.'),
+            Text(c.c2paStatus),
+            if (c.c2paResult case final result?) ...[
+              Text(
+                'Credentials: ${switch (result['status']) {
+                  'present' => 'present',
+                  'absent' => 'not detected',
+                  'remote' => 'remote reference',
+                  _ => 'unknown',
+                }}',
+              ),
+              Text(
+                'Parsing: ${switch (result['status']) {
+                  'present' => 'completed',
+                  'absent' => 'no embedded manifest found',
+                  'remote' => 'remote manifest not fetched',
+                  'unsupported' => 'unsupported format',
+                  'error' => 'failed',
+                  _ => 'unknown',
+                }}',
+              ),
+              Text('Asset integrity: ${result['integrity'] ?? 'unknown'}'),
+              Text(
+                'Claim integrity: ${result['claim_integrity'] ?? 'unknown'}',
+              ),
+              Text(
+                'SDK validation: ${result['validation_state'] ?? 'unknown'}',
+              ),
+              Text('Signature: ${result['signature'] ?? 'unknown'}'),
+              Text(
+                'Trust: ${result['trust'] ?? 'unknown'} (no trust list configured)',
+              ),
+              const Text('Online lookup: disabled'),
+              if (result['error'] != null)
+                SelectableText('Error: ${result['error']}'),
+              if (result['error_code'] != null)
+                SelectableText('Code: ${result['error_code']}'),
+              Material(
+                color: Colors.transparent,
+                child: ExpansionTile(
+                  title: const Text('Verification details'),
+                  children: [
+                    SelectableText(
+                      const JsonEncoder.withIndent('  ').convert(result),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            if (settings.warning != null) Text(settings.warning!),
             const Divider(height: 32),
             Text('Metadata', style: Theme.of(context).textTheme.titleMedium),
             if (c.name == null)
