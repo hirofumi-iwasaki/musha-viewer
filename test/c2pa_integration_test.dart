@@ -4,7 +4,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:musha_viewer/c2pa.dart';
 
 void main() {
-  final release = File('native/c2pa/target/release/libmusha_c2pa.so').absolute;
+  final release = File(
+    Platform.isMacOS
+        ? 'native/c2pa/target/macos/libmusha_c2pa.dylib'
+        : 'native/c2pa/target/release/libmusha_c2pa.so',
+  ).absolute;
   final library = release.existsSync()
       ? release
       : File('native/c2pa/target/debug/libmusha_c2pa.so').absolute;
@@ -37,8 +41,8 @@ void main() {
         contains('assertion.dataHash.mismatch'),
       );
     },
-    skip: !Platform.isLinux || !library.existsSync()
-        ? 'Native Linux library not built; build it first to run the integration test.'
+    skip: !(Platform.isLinux || Platform.isMacOS) || !library.existsSync()
+        ? 'Native library not built; build it first to run the integration test.'
         : false,
   );
 }

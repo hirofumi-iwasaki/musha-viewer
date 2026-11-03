@@ -10,6 +10,8 @@ The EXIF parser returns a map, so duplicate keys can be lost; XMP, IPTC, ICC, Ma
 
 ### Build and validation
 
+For Apple Silicon test builds and download instructions, see [macOS test artifacts](docs/MACOS_ARTIFACTS.md).
+
 For isolated Linux development in the current managed workspace, see [viewer development runtime](docs/CLOUD_ENVIRONMENT.md).
 
 Use Flutter 3.47.4 / Dart 3.13.3 and Rust; build the native engine first as described in [C2PA build instructions](docs/C2PA_BUILD.md). On a Mac, use an Xcode SDK supporting the macOS 27 deployment target:
@@ -31,6 +33,8 @@ musha-viewerはmacOS 27を対象とする閲覧専用Flutter画像ビューア�
 C2PAはc2pa-rsでネットワーク接続せず検証します。存在・解析、アセットとクレームの整合性、署名、信頼、SDK検証状態を別々に表示し、詳細も確認できます。既定では信頼リストがなく信頼状態は不明です。有効な署名は撮影内容の真実性を保証しません。未対応、外部参照、エラー、未検出は区別します。検証やネイティブライブラリの読込が失敗してもプレビューとメタデータは利用できます。
 
 EXIF解析器はマップを返すため同一キーが失われる場合があり、XMP、IPTC、ICC、MakerNote、未知タグを網羅しません。EXIFが空でも他のメタデータが存在しないとは限りません。画像の形式対応はFlutterとOSに依存します。64 MiBを超える入力と4000万画素を超える画像のプレビューを拒否しますが、メモリー使用量を厳密に制限するものではありません。元ファイルは読み取り専用で開きます。設定JSONはmacOSのApplication Support、Linuxの`$XDG_CONFIG_HOME/musha-viewer`（未設定時`~/.config/musha-viewer`）、WindowsのLocalAppDataに保存します。破損または未知バージョンの設定は上書きせず保持します。
+
+Apple Silicon向けテストビルドの取得方法は[macOSテスト成果物](docs/MACOS_ARTIFACTS.md)を参照してください。
 
 管理ワークスペースでの分離したLinux開発環境は[ビューアー開発環境](docs/CLOUD_ENVIRONMENT.md)を参照してください。
 

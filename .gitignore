@@ -4,6 +4,7 @@
 .flutter-plugins-dependencies
 .packages
 build/
+dist/
 coverage/
 **/Flutter/ephemeral/
 **/flutter/ephemeral/
