@@ -1,7 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'dart:ui' show AppExitResponse;
+
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart';
@@ -241,6 +245,77 @@ class _ViewerScreenState extends State<ViewerScreen> {
   bool picking = false;
   bool dragging = false;
   int selection = 0;
+  double swipeDistance = 0;
+  double swipeVertical = 0;
+  double scrollHorizontal = 0;
+  double scrollVertical = 0;
+  bool panZoomEligible = false;
+  Timer? scrollTimer;
+  final Set<int> touchPointers = {};
+  bool touchGestureEligible = false;
+  Size previewSize = Size.zero;
+  bool get zoomed => (transformation.value.entry(0, 0).abs() - 1).abs() > .001;
+
+  void navigate(bool forward) {
+    scrollTimer?.cancel();
+    scrollHorizontal = scrollVertical = 0;
+    transformation.value = Matrix4.identity();
+    unawaited(
+      forward ? widget.controller.next() : widget.controller.previous(),
+    );
+  }
+
+  Future<void> pickFolder() async {
+    final request = ++selection;
+    setState(() => picking = true);
+    try {
+      final path = await getDirectoryPath();
+      if (path != null && mounted && request == selection) {
+        await widget.controller.authorizeDirectory(path);
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open folder: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => picking = false);
+    }
+  }
+
+  Future<void> actualSize() async {
+    final bytes = widget.controller.bytes;
+    if (bytes == null || previewSize.isEmpty) return;
+    final pixelRatio = MediaQuery.devicePixelRatioOf(context);
+    final codec = await ui.instantiateImageCodec(bytes);
+    try {
+      final frame = await codec.getNextFrame();
+      var width = frame.image.width.toDouble();
+      var height = frame.image.height.toDouble();
+      if (const [5, 6, 7, 8].contains(widget.controller.previewOrientation)) {
+        final originalWidth = width;
+        width = height;
+        height = originalWidth;
+      }
+      frame.image.dispose();
+      if (!mounted || widget.controller.bytes != bytes) return;
+      final fit = (previewSize.width / width).clamp(0.0, double.infinity);
+      final scale =
+          1 /
+          ((fit < previewSize.height / height
+                  ? fit
+                  : previewSize.height / height) *
+              pixelRatio);
+      transformation.value = Matrix4.diagonal3Values(scale, scale, 1)
+        ..setEntry(0, 3, previewSize.width * (1 - scale) / 2)
+        ..setEntry(1, 3, previewSize.height * (1 - scale) / 2);
+      setState(() {});
+    } finally {
+      codec.dispose();
+    }
+  }
+
   late final SettingsStore settings =
       widget.settings ??
       SettingsStore(File('/tmp/musha-viewer-test-settings.json'));
@@ -288,6 +363,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
   @override
   void dispose() {
     if (widget.settings == null) settings.dispose();
+    scrollTimer?.cancel();
     transformation.dispose();
     widget.controller.dispose();
     super.dispose();
@@ -309,6 +385,8 @@ class _ViewerScreenState extends State<ViewerScreen> {
           'heic',
           'tif',
           'tiff',
+          'dng',
+          'nef',
         ],
       );
       final file = await openFile(acceptedTypeGroups: [images]);
@@ -332,114 +410,165 @@ class _ViewerScreenState extends State<ViewerScreen> {
     listenable: widget.controller,
     builder: (context, _) {
       final c = widget.controller;
-      return Scaffold(
-        appBar: AppBar(
-          title: Text(
-            c.name ?? 'musha-viewer',
-            overflow: TextOverflow.ellipsis,
-          ),
-          actions: [
-            TextButton.icon(
-              onPressed: picking ? null : pick,
-              icon: const Icon(Icons.folder_open),
-              label: const Text('Open image'),
+      return Focus(
+        autofocus: true,
+        onKeyEvent: (node, event) {
+          if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+            return KeyEventResult.ignored;
+          }
+          final focus = FocusManager.instance.primaryFocus?.context;
+          if (focus != null &&
+              focus.findAncestorWidgetOfExactType<EditableText>() != null) {
+            return KeyEventResult.ignored;
+          }
+          if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+            navigate(false);
+            return KeyEventResult.handled;
+          }
+          if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+            navigate(true);
+            return KeyEventResult.handled;
+          }
+          return KeyEventResult.ignored;
+        },
+        child: Scaffold(
+          appBar: AppBar(
+            bottom: c.directoryStatus == null
+                ? null
+                : PreferredSize(
+                    preferredSize: const Size.fromHeight(36),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      child: Text(c.directoryStatus!),
+                    ),
+                  ),
+            title: Text(
+              c.name == null
+                  ? 'musha-viewer'
+                  : '${c.name}${c.imageCount > 0 && c.currentIndex >= 0 ? '  ${c.currentIndex + 1} / ${c.imageCount}' : ''}',
+              overflow: TextOverflow.ellipsis,
             ),
-            IconButton(
-              tooltip: 'Toggle inspector',
-              onPressed: () {
-                settings.value.inspectorVisible =
-                    !settings.value.inspectorVisible;
-                settings.changed();
-              },
-              icon: const Icon(Icons.view_sidebar),
-            ),
-            PopupMenuButton<ThemeMode>(
-              tooltip: 'Appearance',
-              onSelected: (theme) {
-                settings.value.theme = theme;
-                settings.changed();
-              },
-              itemBuilder: (_) => [
-                for (final mode in ThemeMode.values)
-                  PopupMenuItem(value: mode, child: Text(mode.name)),
-              ],
-            ),
-            const SizedBox(width: 12),
-          ],
-        ),
-        body: DropTarget(
-          onDragEntered: (_) => setState(() => dragging = true),
-          onDragExited: (_) => setState(() => dragging = false),
-          onDragDone: (details) {
-            setState(() => dragging = false);
-            unawaited(dropped(details.files));
-          },
-          child: Stack(
-            children: [
-              LayoutBuilder(
-                builder: (context, constraints) {
-                  final preview = _preview(c);
-                  final inspector = _inspector(c);
-                  if (!settings.value.inspectorVisible) return preview;
-                  return constraints.maxWidth < 650
-                      ? Column(
-                          children: [
-                            Expanded(child: preview),
-                            SizedBox(
-                              height: constraints.maxHeight * .42,
-                              child: inspector,
-                            ),
-                          ],
-                        )
-                      : Row(
-                          children: [
-                            Expanded(child: preview),
-                            MouseRegion(
-                              cursor: SystemMouseCursors.resizeColumn,
-                              child: GestureDetector(
-                                behavior: HitTestBehavior.opaque,
-                                onHorizontalDragUpdate: (details) {
-                                  setState(() {
-                                    settings.value.inspectorWidth =
-                                        (settings.value.inspectorWidth -
-                                                details.delta.dx)
-                                            .clamp(
-                                              240,
-                                              (constraints.maxWidth - 200)
-                                                  .clamp(240, 1000),
-                                            );
-                                    settings.changed();
-                                  });
-                                },
-                                child: const SizedBox(width: 8),
-                              ),
-                            ),
-                            SizedBox(
-                              width: settings.value.inspectorWidth.clamp(
-                                240,
-                                constraints.maxWidth - 200,
-                              ),
-                              child: inspector,
-                            ),
-                          ],
-                        );
-                },
+            actions: [
+              IconButton(
+                tooltip: 'Previous image',
+                onPressed: c.canPrevious ? () => navigate(false) : null,
+                icon: const Icon(Icons.chevron_left),
               ),
-              if (dragging)
-                const Positioned.fill(
-                  child: IgnorePointer(
-                    child: ColoredBox(
-                      color: Color(0x88526984),
-                      child: Center(
-                        child: Text(
-                          'Drop one image',
-                          style: TextStyle(color: Colors.white, fontSize: 28),
+              IconButton(
+                tooltip: 'Next image',
+                onPressed: c.canNext ? () => navigate(true) : null,
+                icon: const Icon(Icons.chevron_right),
+              ),
+              TextButton.icon(
+                onPressed: picking ? null : pickFolder,
+                icon: const Icon(Icons.folder),
+                label: const Text('Authorize folder'),
+              ),
+              TextButton.icon(
+                onPressed: picking ? null : pick,
+                icon: const Icon(Icons.folder_open),
+                label: const Text('Open image'),
+              ),
+              IconButton(
+                tooltip: 'Toggle inspector',
+                onPressed: () {
+                  settings.value.inspectorVisible =
+                      !settings.value.inspectorVisible;
+                  settings.changed();
+                },
+                icon: const Icon(Icons.view_sidebar),
+              ),
+              PopupMenuButton<ThemeMode>(
+                tooltip: 'Appearance',
+                onSelected: (theme) {
+                  settings.value.theme = theme;
+                  settings.changed();
+                },
+                itemBuilder: (_) => [
+                  for (final mode in ThemeMode.values)
+                    PopupMenuItem(value: mode, child: Text(mode.name)),
+                ],
+              ),
+              const SizedBox(width: 12),
+            ],
+          ),
+          body: DropTarget(
+            onDragEntered: (_) => setState(() => dragging = true),
+            onDragExited: (_) => setState(() => dragging = false),
+            onDragDone: (details) {
+              setState(() => dragging = false);
+              unawaited(dropped(details.files));
+            },
+            child: Stack(
+              children: [
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final preview = _preview(c);
+                    final inspector = _inspector(c);
+                    if (!settings.value.inspectorVisible) return preview;
+                    return constraints.maxWidth < 650
+                        ? Column(
+                            children: [
+                              Expanded(child: preview),
+                              SizedBox(
+                                height: constraints.maxHeight * .42,
+                                child: inspector,
+                              ),
+                            ],
+                          )
+                        : Row(
+                            children: [
+                              Expanded(child: preview),
+                              MouseRegion(
+                                cursor: SystemMouseCursors.resizeColumn,
+                                child: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onHorizontalDragUpdate: (details) {
+                                    setState(() {
+                                      settings.value.inspectorWidth =
+                                          (settings.value.inspectorWidth -
+                                                  details.delta.dx)
+                                              .clamp(
+                                                240,
+                                                (constraints.maxWidth - 200)
+                                                    .clamp(240, 1000),
+                                              );
+                                      settings.changed();
+                                    });
+                                  },
+                                  child: const SizedBox(width: 8),
+                                ),
+                              ),
+                              SizedBox(
+                                width: settings.value.inspectorWidth.clamp(
+                                  240,
+                                  constraints.maxWidth - 200,
+                                ),
+                                child: inspector,
+                              ),
+                            ],
+                          );
+                  },
+                ),
+                if (dragging)
+                  const Positioned.fill(
+                    child: IgnorePointer(
+                      child: ColoredBox(
+                        color: Color(0x88526984),
+                        child: Center(
+                          child: Text(
+                            'Drop one image',
+                            style: TextStyle(color: Colors.white, fontSize: 28),
+                          ),
                         ),
                       ),
                     ),
                   ),
-                ),
-            ],
+              ],
+            ),
           ),
         ),
       );
@@ -454,20 +583,107 @@ class _ViewerScreenState extends State<ViewerScreen> {
           child: c.loading
               ? const Center(child: CircularProgressIndicator())
               : c.bytes != null
-              ? InteractiveViewer(
-                  transformationController: transformation,
-                  minScale: 0.2,
-                  maxScale: 8,
-                  child: SizedBox.expand(
-                    child: Image.memory(
-                      c.bytes!,
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, error, _) => Text(
-                        'Image display failed: $error',
-                        style: const TextStyle(color: Colors.white),
+              ? LayoutBuilder(
+                  builder: (context, constraints) {
+                    previewSize = constraints.biggest;
+                    return Listener(
+                      onPointerDown: (event) {
+                        if (event.kind != PointerDeviceKind.touch) return;
+                        touchPointers.add(event.pointer);
+                        if (touchPointers.length == 1) {
+                          swipeDistance = 0;
+                          swipeVertical = 0;
+                          touchGestureEligible = !zoomed;
+                        } else {
+                          touchGestureEligible = false;
+                        }
+                      },
+                      onPointerMove: (event) {
+                        if (touchGestureEligible &&
+                            touchPointers.contains(event.pointer)) {
+                          swipeDistance += event.delta.dx;
+                          swipeVertical += event.delta.dy;
+                        }
+                      },
+                      onPointerUp: (event) {
+                        if (touchGestureEligible &&
+                            !zoomed &&
+                            swipeDistance.abs() > 80 &&
+                            swipeDistance.abs() > swipeVertical.abs()) {
+                          navigate(swipeDistance < 0);
+                        }
+                        touchPointers.remove(event.pointer);
+                        touchGestureEligible = false;
+                      },
+                      onPointerCancel: (event) {
+                        touchPointers.remove(event.pointer);
+                        touchGestureEligible = false;
+                      },
+                      onPointerPanZoomStart: (_) {
+                        swipeDistance = swipeVertical = 0;
+                        panZoomEligible = !zoomed;
+                      },
+                      onPointerPanZoomUpdate: (event) {
+                        if (zoomed || (event.scale - 1).abs() >= .01) {
+                          panZoomEligible = false;
+                          swipeDistance = swipeVertical = 0;
+                        } else if (panZoomEligible) {
+                          swipeDistance += event.panDelta.dx;
+                          swipeVertical += event.panDelta.dy;
+                        }
+                      },
+                      onPointerPanZoomEnd: (_) {
+                        if (panZoomEligible &&
+                            !zoomed &&
+                            swipeDistance.abs() > 60 &&
+                            swipeDistance.abs() > swipeVertical.abs()) {
+                          navigate(swipeDistance < 0);
+                        }
+                        swipeDistance = swipeVertical = 0;
+                        panZoomEligible = false;
+                      },
+                      onPointerSignal: (event) {
+                        if (event is! PointerScrollEvent || zoomed) return;
+                        scrollHorizontal += event.scrollDelta.dx;
+                        scrollVertical += event.scrollDelta.dy;
+                        scrollTimer?.cancel();
+                        scrollTimer = Timer(
+                          const Duration(milliseconds: 180),
+                          () {
+                            final horizontal = scrollHorizontal;
+                            final vertical = scrollVertical;
+                            scrollHorizontal = scrollVertical = 0;
+                            if (mounted &&
+                                !zoomed &&
+                                horizontal.abs() > 30 &&
+                                horizontal.abs() > vertical.abs()) {
+                              navigate(horizontal > 0);
+                            }
+                          },
+                        );
+                      },
+                      child: InteractiveViewer(
+                        transformationController: transformation,
+                        panEnabled: zoomed,
+                        minScale: 0.01,
+                        maxScale: 100,
+                        onInteractionEnd: (_) => setState(() {}),
+                        child: SizedBox.expand(
+                          child: _orientedPreview(
+                            c,
+                            Image.memory(
+                              c.bytes!,
+                              fit: BoxFit.contain,
+                              errorBuilder: (_, error, _) => Text(
+                                'Image display failed: $error',
+                                style: const TextStyle(color: Colors.white),
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
+                    );
+                  },
                 )
               : Center(
                   child: Padding(
@@ -484,15 +700,45 @@ class _ViewerScreenState extends State<ViewerScreen> {
           Positioned(
             right: 12,
             bottom: 12,
-            child: FilledButton.tonalIcon(
-              onPressed: () => transformation.value = Matrix4.identity(),
-              icon: const Icon(Icons.fit_screen),
-              label: const Text('Fit'),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FilledButton.tonalIcon(
+                  onPressed: () =>
+                      setState(() => transformation.value = Matrix4.identity()),
+                  icon: const Icon(Icons.fit_screen),
+                  label: const Text('Fit'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.tonal(
+                  onPressed: actualSize,
+                  child: const Text('100%'),
+                ),
+              ],
             ),
           ),
       ],
     ),
   );
+
+  Widget _orientedPreview(ViewerController c, Widget image) {
+    final orientation = c.previewOrientation ?? 1;
+    final turns = switch (orientation) {
+      3 || 4 => 2,
+      6 || 7 => 1,
+      5 || 8 => 3,
+      _ => 0,
+    };
+    final mirrored =
+        orientation == 2 ||
+        orientation == 4 ||
+        orientation == 5 ||
+        orientation == 7;
+    return RotatedBox(
+      quarterTurns: turns,
+      child: mirrored ? Transform.flip(flipX: true, child: image) : image,
+    );
+  }
 
   Widget _inspector(ViewerController c) {
     final entries = [...c.fileEntries, ...c.imageEntries, ...c.exifEntries];

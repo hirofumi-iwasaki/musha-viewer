@@ -169,6 +169,13 @@ mod tests {
             .contains("cawg.ica.did_unavailable"));
     }
     #[test]
+    fn dng_uses_tiff_handler_on_original_bytes() {
+        // Minimal little-endian TIFF with an empty first IFD and no manifest.
+        let dng = b"II\x2a\x00\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        assert_eq!(result(dng, "image/x-adobe-dng")["status"], "absent");
+        assert_eq!(result(b"not a DNG", "image/x-adobe-dng")["status"], "error");
+    }
+    #[test]
     fn absent_and_bad_inputs_are_distinct() {
         let unsigned = include_bytes!("../tests/fixtures/unsigned.jpg");
         assert_eq!(result(unsigned, "image/jpeg")["status"], "absent");

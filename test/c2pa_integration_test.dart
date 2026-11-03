@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:musha_viewer/c2pa.dart';
@@ -12,6 +13,20 @@ void main() {
   final library = release.existsSync()
       ? release
       : File('native/c2pa/target/debug/libmusha_c2pa.so').absolute;
+  test(
+    'DNG names use the native DNG handler',
+    () async {
+      final result = await verifyC2pa(
+        Uint8List.fromList([73, 73, 42, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        'original.DNG',
+        libraryPath: library.path,
+      );
+      expect(result['status'], 'absent');
+    },
+    skip: !(Platform.isLinux || Platform.isMacOS) || !library.existsSync()
+        ? 'Native library not built; build it first to run the integration test.'
+        : false,
+  );
   test(
     'native verification distinguishes signed and tampered snapshots',
     () async {

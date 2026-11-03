@@ -51,6 +51,7 @@ Map<String, dynamic> _verify((Uint8List, String, String?) input) {
                 'heic': 'image/heic',
                 'tif': 'image/tiff',
                 'tiff': 'image/tiff',
+                'dng': 'image/x-adobe-dng',
               }[extension] ??
               'application/octet-stream')
           .toNativeUtf8();
