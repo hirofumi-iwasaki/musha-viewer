@@ -2,42 +2,54 @@
 
 ## English
 
-musha-viewer is a planned open-source image and video viewer that displays embedded metadata and checks C2PA Content Credentials. It uses Dart and Flutter, initially targeting macOS 27, with Windows, Ubuntu, iOS, iPadOS, and Android planned for later releases.
+musha-viewer is a read-only Flutter image viewer for macOS 27. Open or drop one image to inspect a preview, file information, decoded dimensions, EXIF tags, and an offline C2PA verification result. Use the inspector toggle and divider to change the layout, and the appearance menu for system, light, or dark theme. Window position, normal size, maximized state, inspector preferences, and theme are saved locally. Video, Finder “Open With”, and file history are not implemented.
 
-The desktop interface combines a main preview with a resizable right inspector containing a two-column key/value metadata list and a C2PA verification summary. The application is read-only: it will not edit the opened media files.
+C2PA verification is performed by c2pa-rs without network access. Presence, parsing, asset integrity, claim integrity, signature, trust and SDK validation are shown separately, with SDK details available in the inspector. The default configuration has no trust list; trust is unknown and a valid signature does not establish that depicted events are true. Unsupported files, remote credentials, errors, and absent credentials are distinct states. Preview and metadata remain usable if verification fails or the native library is unavailable.
 
-**Status:** design stage. This repository does not yet contain a Flutter application, runnable builds, or a verified format-support matrix. The documentation records agreed direction separately from dependencies and capabilities that still require evaluation.
+The EXIF parser returns a map, so duplicate keys can be lost; XMP, IPTC, ICC, MakerNotes, and unknown tags are not comprehensively covered. An empty EXIF result does not prove that a file contains no metadata. Image decoding depends on Flutter and the OS. Files over 64 MiB and images over 40 megapixels are rejected for preview; the latter limit does not strictly cap memory. The source file is opened read-only. Settings are stored as versioned JSON in macOS Application Support, Linux `$XDG_CONFIG_HOME/musha-viewer` (or `~/.config/musha-viewer`), and Windows LocalAppData. Corrupt or unknown-version settings are preserved instead of overwritten.
 
-### Design documents
+### Build and validation
 
-The initial detailed design documents are in Japanese:
+For Apple Silicon test builds and download instructions, see [macOS test artifacts](docs/MACOS_ARTIFACTS.md).
 
-- [Project policy and initial scope](docs/PROJECT_PLAN.md)
-- [Architecture and candidate technologies](docs/ARCHITECTURE.md)
-- [Metadata and C2PA behavior](docs/METADATA_AND_C2PA.md)
-- [Settings and platform integration](docs/SETTINGS_AND_PLATFORMS.md)
-- [Roadmap and acceptance criteria](docs/ROADMAP.md)
+For isolated Linux development in the current managed workspace, see [viewer development runtime](docs/CLOUD_ENVIRONMENT.md).
 
-### License
+Use Flutter 3.47.4 / Dart 3.13.3 and Rust; build the native engine first as described in [C2PA build instructions](docs/C2PA_BUILD.md). On a Mac, use an Xcode SDK supporting the macOS 27 deployment target:
 
-Project materials are licensed under the [Apache License 2.0](LICENSE). Future third-party dependencies retain their own licenses; their versions, build options, and redistribution requirements must be reviewed before adoption. No media parser or playback dependency has been selected or bundled yet.
+```sh
+flutter pub get
+flutter analyze
+flutter test
+flutter run -d macos
+flutter build macos --release
+```
+
+The macOS runner enables App Sandbox and user-selected read-only access. `org.musha.mushaViewer` is a provisional bundle identifier; configure an appropriate identifier and signing before distribution. macOS build, sandbox selection and drag/drop, release execution, signing, notarization, and App Store distribution require verification on a Mac; follow the [release and device checklist](docs/RELEASE_0_1_0.md). The Linux runner is for development and does not establish release support.
 
 ## 日本語
 
-musha-viewerは、画像・動画のプレビュー、埋め込みメタデータの表示、C2PA Content Credentialsの確認を行うオープンソースアプリケーションです。DartとFlutterを基盤とし、初版はmacOS 27を対象とします。将来はWindows、Ubuntu、iOS、iPadOS、Androidへの対応を予定しています。
+musha-viewerはmacOS 27を対象とする閲覧専用Flutter画像ビューアーです。画像を選択または一つドロップすると、プレビュー、ファイル情報、デコード後の寸法、EXIF、オフラインのC2PA検証結果を表示します。インスペクターの表示・幅、システム／ライト／ダークのテーマ、通常時のウィンドウ位置・大きさ、最大化状態は保存されます。動画、Finderの「このアプリケーションで開く」、履歴は未実装です。
 
-デスクトップでは、メインのプレビューと、幅を変更できる右側のインスペクターを配置します。インスペクターにはキー・値の2列でメタデータを表示し、C2PAの検証結果を示します。閲覧専用であり、開いたメディアファイルを編集しません。
+C2PAはc2pa-rsでネットワーク接続せず検証します。存在・解析、アセットとクレームの整合性、署名、信頼、SDK検証状態を別々に表示し、詳細も確認できます。既定では信頼リストがなく信頼状態は不明です。有効な署名は撮影内容の真実性を保証しません。未対応、外部参照、エラー、未検出は区別します。検証やネイティブライブラリの読込が失敗してもプレビューとメタデータは利用できます。
 
-**現在の状態：設計段階です。** Flutterアプリケーション、実行可能なビルド、検証済みの対応形式表はまだありません。文書では合意済みの方針と、調査・検証が必要な依存関係や機能を区別しています。
+EXIF解析器はマップを返すため同一キーが失われる場合があり、XMP、IPTC、ICC、MakerNote、未知タグを網羅しません。EXIFが空でも他のメタデータが存在しないとは限りません。画像の形式対応はFlutterとOSに依存します。64 MiBを超える入力と4000万画素を超える画像のプレビューを拒否しますが、メモリー使用量を厳密に制限するものではありません。元ファイルは読み取り専用で開きます。設定JSONはmacOSのApplication Support、Linuxの`$XDG_CONFIG_HOME/musha-viewer`（未設定時`~/.config/musha-viewer`）、WindowsのLocalAppDataに保存します。破損または未知バージョンの設定は上書きせず保持します。
 
-### 設計文書
+Apple Silicon向けテストビルドの取得方法は[macOSテスト成果物](docs/MACOS_ARTIFACTS.md)を参照してください。
 
-- [プロジェクト方針・初版の範囲](docs/PROJECT_PLAN.md)
-- [アーキテクチャー・技術候補](docs/ARCHITECTURE.md)
-- [メタデータ・C2PAの仕様](docs/METADATA_AND_C2PA.md)
-- [設定・プラットフォーム対応](docs/SETTINGS_AND_PLATFORMS.md)
-- [開発順序・受け入れ条件](docs/ROADMAP.md)
+管理ワークスペースでの分離したLinux開発環境は[ビューアー開発環境](docs/CLOUD_ENVIRONMENT.md)を参照してください。
 
-### ライセンス
+ビルド前に[C2PAビルド手順](docs/C2PA_BUILD.md)に従ってネイティブエンジンを準備し、上記のFlutterコマンドを実行してください。macOSのビルド、Sandbox内でのファイル選択・ドロップ、Release起動、署名、公証、App Store配布は[リリース・実機確認リスト](docs/RELEASE_0_1_0.md)に沿った検証が必要です。Linuxランナーは開発用です。
 
-本プロジェクトの成果物は[Apache License 2.0](LICENSE)で公開します。将来採用する第三者ライブラリには各ライセンスが適用されます。採用前にバージョン、ビルドオプション、再配布条件を確認します。現時点ではメディア解析・再生ライブラリを選定・同梱していません。
+## Design / 設計文書
+
+The Japanese design documents describe the broader planned product. 設計文書には今後の目標を含みます。
+
+- [Project policy / プロジェクト方針](docs/PROJECT_PLAN.md)
+- [Architecture / アーキテクチャー](docs/ARCHITECTURE.md)
+- [Metadata and C2PA / メタデータとC2PA](docs/METADATA_AND_C2PA.md)
+- [Settings and platforms / 設定とプラットフォーム](docs/SETTINGS_AND_PLATFORMS.md)
+- [Roadmap / ロードマップ](docs/ROADMAP.md)
+
+## License / ライセンス
+
+Project code is licensed under [Apache License 2.0](LICENSE). Third-party components retain their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md) and the locked dependency versions. 第三者依存関係にはそれぞれのライセンスが適用されます。

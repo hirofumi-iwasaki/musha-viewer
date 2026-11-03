@@ -1,0 +1,22 @@
+name: musha_viewer
+description: A read-only image and metadata viewer.
+publish_to: none
+version: 0.1.0+1
+environment:
+  sdk: ^3.13.3
+dependencies:
+  flutter:
+    sdk: flutter
+  file_selector: ^1.1.0
+  exif: ^3.3.0
+  ffi: ^2.1.4
+  path_provider: ^2.1.5
+  desktop_drop: ^0.7.0
+  window_manager: ^0.5.1
+  screen_retriever: ^0.2.0
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+flutter:
+  uses-material-design: true

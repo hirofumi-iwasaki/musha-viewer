@@ -1,0 +1,50 @@
+#!/bin/sh
+# Create a viewer-only container. Run from the repository root.
+set -eu
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+: "${FLUTTER_SEED:?Set FLUTTER_SEED to the verified Flutter SDK directory}"
+: "${RUSTUP_SEED:?Set RUSTUP_SEED to the verified Rustup directory}"
+: "${CARGO_SEED:?Set CARGO_SEED to the verified Cargo directory}"
+[ -d "$RUSTUP_SEED/toolchains/stable-x86_64-unknown-linux-gnu" ] || { echo 'Rust seed must contain stable-x86_64-unknown-linux-gnu.' >&2; exit 1; }
+docker_local() { env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH docker --host=unix:///var/run/docker.sock "$@"; }
+docker_local info >/dev/null
+if docker_local inspect musha-viewer-dev >/dev/null 2>&1; then
+  echo 'Container musha-viewer-dev already exists; refusing to replace it.' >&2
+  exit 1
+fi
+docker_local build --secret id=system_ca,src=/etc/ssl/certs/ca-certificates.crt -f "$repo_dir/.devcontainer/Dockerfile" -t musha-viewer-dev:0.1.0 "$repo_dir"
+for vol in musha-viewer-home musha-viewer-sdk musha-viewer-build musha-viewer-dart-tool musha-viewer-rust-target; do docker_local volume create "$vol" >/dev/null; done
+# Refuse to mix toolchains if a previous private volume already exists.
+docker_local run --rm --user 0 \
+  --mount type=volume,src=musha-viewer-sdk,dst=/opt/viewer \
+  --mount type=volume,src=musha-viewer-home,dst=/home/viewer \
+  --mount "type=bind,src=$FLUTTER_SEED,dst=/seed/flutter,readonly" \
+  --mount "type=bind,src=$RUSTUP_SEED/toolchains,dst=/seed/rust-toolchains,readonly" \
+  --mount "type=bind,src=$CARGO_SEED/bin,dst=/seed/cargo-bin,readonly" \
+  --mount "type=bind,src=$CARGO_SEED/registry,dst=/seed/cargo-registry,readonly" \
+  musha-viewer-dev:0.1.0 sh -c '
+    set -eu
+    if [ -e /opt/viewer/flutter/bin/flutter ] || [ -e /home/viewer/.rustup ]; then echo "Private toolchain volume already seeded; refusing overwrite" >&2; exit 1; fi
+    cp -a /seed/flutter /opt/viewer/flutter
+    mkdir -p /home/viewer/.rustup /home/viewer/.cargo /home/viewer/.pub-cache
+    cp -a /seed/rust-toolchains /home/viewer/.rustup/toolchains
+    cp -a /seed/cargo-bin /home/viewer/.cargo/bin
+    cp -a /seed/cargo-registry /home/viewer/.cargo/registry
+    # Replace copied Git configuration and hooks with known public settings.
+    rm -rf /opt/viewer/flutter/.git/hooks /opt/viewer/flutter/.git/logs
+    printf "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n[remote \"origin\"]\n\turl = https://github.com/flutter/flutter.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n" > /opt/viewer/flutter/.git/config
+    chown -R 1000:1000 /opt/viewer /home/viewer
+    su viewer -c "RUSTUP_HOME=/home/viewer/.rustup CARGO_HOME=/home/viewer/.cargo /home/viewer/.cargo/bin/rustup default stable"
+  '
+docker_local run -d --name musha-viewer-dev \
+  --mount "type=bind,src=$repo_dir,dst=/project" \
+  --mount type=volume,src=musha-viewer-home,dst=/home/viewer \
+  --mount type=volume,src=musha-viewer-sdk,dst=/opt/viewer \
+  --mount type=volume,src=musha-viewer-build,dst=/project/build \
+  --mount type=volume,src=musha-viewer-dart-tool,dst=/project/.dart_tool \
+  --mount type=volume,src=musha-viewer-rust-target,dst=/project/native/c2pa/target \
+  --mount type=bind,src=/etc/ssl/certs/ca-certificates.crt,dst=/etc/ssl/certs/ca-certificates.crt,readonly \
+  musha-viewer-dev:0.1.0 >/dev/null
+# New anonymous volumes are root-owned by Docker.
+docker_local exec --user 0 musha-viewer-dev chown 1000:1000 /project/build /project/.dart_tool /project/native/c2pa/target
+printf '%s\n' 'Ready: scripts/cloud-run flutter --version'
