@@ -11,6 +11,7 @@ import sys
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = REPO / "dist" / "macos-test" / "THIRD_PARTY_LICENSES"
+SUPPLEMENTS = REPO / "native" / "c2pa" / "licenses"
 
 
 def safe_name(value):
@@ -32,6 +33,7 @@ def collect(metadata, output):
     lines = ["# Rust dependency license inventory", "",
              "Generated from Cargo's locked package metadata. This includes all resolved packages, "
              "including platform-specific packages that may not be linked into this build. "
+             "Version-specific supplements include source references and are used when packaged files are absent. "
              "License expressions are package metadata, not a legal conclusion. "
              "Missing files require review.", ""]
     missing = []
@@ -44,8 +46,12 @@ def collect(metadata, output):
             dirname += f"-{names[dirname]}"
         root = Path(package["manifest_path"]).parent
         candidates = sorted((p for p in root.iterdir()
-                             if p.is_file() and p.name.upper().startswith(("LICENSE", "LICENCE", "COPYING", "NOTICE"))),
+                             if p.is_file() and p.name.upper().startswith(("LICENSE", "LICENCE", "COPYING", "NOTICE", "COPYRIGHT"))),
                             key=lambda p: p.name)
+        # Some packages keep texts in a top-level LICENSES or licenses directory.
+        for directory in sorted(root.iterdir(), key=lambda p: p.name):
+            if directory.is_dir() and directory.name.lower() in ("licenses", "licences"):
+                candidates.extend(sorted(p for p in directory.rglob("*") if p.is_file()))
         declared = package.get("license_file")
         if declared:
             declared_path = Path(declared)
@@ -55,6 +61,11 @@ def collect(metadata, output):
                 candidates.append(declared_path)
             elif not declared_path.is_file():
                 missing.append(f"{name} {version}: declared license_file is missing")
+        # Supplement only an exact name and version, when the published crate lacks
+        # license/notice text. SOURCE.md records the pinned upstream provenance.
+        supplement = SUPPLEMENTS / f"{name}-{version}"
+        if not candidates and supplement.is_dir():
+            candidates.extend(sorted(p for p in supplement.iterdir() if p.is_file()))
         copied = []
         if candidates:
             dest = output / dirname
