@@ -4,6 +4,8 @@
 
 musha-viewer is a read-only Flutter image viewer for macOS 27. Open or drop one image to inspect a preview, file information, decoded dimensions, EXIF tags, and an offline C2PA verification result. Use the inspector toggle and divider to change the layout, and the appearance menu for system, light, or dark theme. Window position, normal size, maximized state, inspector preferences, and theme are saved locally. DNG and NEF can show an embedded JPEG preview; select a folder to navigate supported images in natural filename order. Fit and 100% controls are available. Video, Finder “Open With”, and file history are not implemented.
 
+Starting with version 1.0, versions distributed through app stores may be paid. The source code will remain publicly available.
+
 C2PA verification is performed by c2pa-rs without network access. Presence, parsing, asset integrity, claim integrity, signature, trust and SDK validation are shown separately, with SDK details available in the inspector. The default configuration has no trust list; trust is unknown and a valid signature does not establish that depicted events are true. Unsupported files, remote credentials, errors, and absent credentials are distinct states. Preview and metadata remain usable if verification fails or the native library is unavailable.
 
 The EXIF parser returns a map, so duplicate keys can be lost; XMP, IPTC, ICC, MakerNotes, and unknown tags are not comprehensively covered. An empty EXIF result does not prove that a file contains no metadata. Image decoding depends on Flutter and the OS. Ordinary files over 64 MiB are rejected. Large previews can require substantial memory when decoded. RAW previews are extracted separately; original-file metadata and verification require a RAW snapshot of at most 256 MiB and may use substantially more memory due to copying. The source file is opened read-only. Settings are stored as versioned JSON in macOS Application Support, Linux `$XDG_CONFIG_HOME/musha-viewer` (or `~/.config/musha-viewer`), and Windows LocalAppData. Corrupt or unknown-version settings are preserved instead of overwritten.
@@ -31,6 +33,8 @@ The macOS runner enables App Sandbox and user-selected read-only access. `org.mu
 ## 日本語
 
 musha-viewerはmacOS 27を対象とする閲覧専用Flutter画像ビューアーです。画像を選択または一つドロップすると、プレビュー、ファイル情報、デコード後の寸法、EXIF、オフラインのC2PA検証結果を表示します。インスペクターの表示・幅、システム／ライト／ダークのテーマ、通常時のウィンドウ位置・大きさ、最大化状態は保存されます。DNG・NEFは埋め込みJPEGプレビューを表示でき、フォルダーを選ぶと対応画像をファイル名の自然順で移動できます。画面に合わせる表示と100%表示も利用できます。動画、Finderの「このアプリケーションで開く」、履歴は未実装です。
+
+1.0以降は各ストア配布版については有料にする可能性があります。ソースコードは引き続き公開します。
 
 C2PAはc2pa-rsでネットワーク接続せず検証します。存在・解析、アセットとクレームの整合性、署名、信頼、SDK検証状態を別々に表示し、詳細も確認できます。既定では信頼リストがなく信頼状態は不明です。有効な署名は撮影内容の真実性を保証しません。未対応、外部参照、エラー、未検出は区別します。検証やネイティブライブラリの読込が失敗してもプレビューとメタデータは利用できます。
 
