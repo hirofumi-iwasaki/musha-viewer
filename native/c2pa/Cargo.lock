@@ -298,9 +298,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "c2pa"
-version = "0.91.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f258d5bfe6465d1a5c570d32b70a261f35e4e45a753e7122a88d3ba0472999b0"
+version = "0.91.10"
 dependencies = [
  "asn1-rs",
  "async-generic",
@@ -1706,7 +1704,11 @@ dependencies = [
 name = "musha_c2pa"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "c2pa",
+ "rasn",
+ "rasn-ocsp",
+ "rasn-pkix",
  "reqwest",
  "serde_json",
 ]

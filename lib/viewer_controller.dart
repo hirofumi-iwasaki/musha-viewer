@@ -250,6 +250,10 @@ class ViewerController extends ChangeNotifier {
                   value['status'] == 'error' ||
                   value['status'] == 'remote'
               ? 'Online check incomplete: ${value['online_error'] ?? 'Some information was unavailable.'}'
+              : value['online_ocsp_status'] == 'revoked'
+              ? 'Live Leica revocation check: revoked; trust remains unknown'
+              : value['online_ocsp_status'] == 'good'
+              ? 'Live certificate revocation check passed; overall trust remains unknown'
               : 'Requested network resources retrieved; trust and revocation remain unconfirmed';
           onlineVerifying = false;
         });

@@ -9,7 +9,7 @@ use std::{
     panic::catch_unwind,
     slice,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -28,9 +28,10 @@ impl c2pa::http::SyncHttpResolver for OfflineResolver {
     }
 }
 
-// All traffic is HTTPS GET without caller-supplied headers, body, redirects, or proxy.
+// HTTPS GET is permitted generally; a strictly classified Leica OCSP GET may use HTTP.
 // Resolve once and pin every connection to the checked addresses to prevent rebinding.
 const RESPONSE_LIMIT: u64 = 16 * 1024 * 1024;
+const OCSP_RESPONSE_LIMIT: u64 = 1024 * 1024;
 const REQUEST_LIMIT: usize = 16;
 const TIMEOUT: Duration = Duration::from_secs(10);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
@@ -41,6 +42,9 @@ struct OnlineState {
     requests: AtomicUsize,
     hosts: Mutex<Vec<String>>,
     error: Mutex<Option<&'static str>>,
+    ocsp_attempted: AtomicBool,
+    issuer_ocsp_attempts: AtomicUsize,
+    leaf_ocsp_response: AtomicBool,
 }
 impl Default for OnlineState {
     fn default() -> Self {
@@ -49,8 +53,70 @@ impl Default for OnlineState {
             requests: AtomicUsize::new(0),
             hosts: Mutex::new(Vec::new()),
             error: Mutex::new(None),
+            ocsp_attempted: AtomicBool::new(false),
+            issuer_ocsp_attempts: AtomicUsize::new(0),
+            leaf_ocsp_response: AtomicBool::new(false),
         }
     }
+}
+fn is_leica_ocsp_request(url: &reqwest::Url) -> bool {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    if url.scheme() != "http"
+        || url.host_str() != Some("ocsp.leica.systems")
+        || url.port_or_known_default() != Some(80)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    let Some(encoded) = url.path().strip_prefix('/') else {
+        return false;
+    };
+    if encoded.is_empty() || encoded.len() > 2048 {
+        return false;
+    }
+    let Ok(der) = STANDARD.decode(encoded) else {
+        return false;
+    };
+    if STANDARD.encode(&der) != encoded {
+        return false;
+    }
+    let Ok(request) = rasn::der::decode::<rasn_ocsp::OcspRequest>(&der) else {
+        return false;
+    };
+    if rasn::der::encode(&request).ok().as_deref() != Some(der.as_slice())
+        || request.optional_signature.is_some()
+        || request.tbs_request.version != 0u8.into()
+        || request.tbs_request.requestor_name.is_some()
+        || request.tbs_request.request_extensions.is_some()
+        || request.tbs_request.request_list.len() != 1
+    {
+        return false;
+    }
+    let entry = &request.tbs_request.request_list[0];
+    let id = &entry.req_cert;
+    let serial = match rasn::der::encode(&id.serial_number) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    entry.single_request_extensions.is_none()
+        && id.hash_algorithm.algorithm.to_string() == "1.3.14.3.2.26"
+        && id
+            .hash_algorithm
+            .parameters
+            .as_ref()
+            .is_some_and(|p| p.as_bytes() == [0x05, 0x00])
+        && id.issuer_name_hash.len() == 20
+        && id.issuer_key_hash.len() == 20
+        && serial.len() >= 3
+        && serial[0] == 2
+        && serial[1] > 0
+        && serial[1] <= 21
+        && serial[2] & 0x80 == 0
+        && serial[2..].iter().any(|byte| *byte != 0)
+        && (serial[1] <= 20 || (serial[2] == 0 && serial[3] & 0x80 != 0))
 }
 impl OnlineState {
     fn record_host(&self, host: &str) {
@@ -107,6 +173,37 @@ fn public_ip(ip: IpAddr) -> bool {
     }
 }
 struct OnlineResolver(Arc<OnlineState>);
+fn live_ocsp_status(validation: &Value) -> Option<&'static str> {
+    let codes = ["success", "informational", "failure"]
+        .iter()
+        .filter_map(|kind| validation["activeManifest"][*kind].as_array())
+        .flatten()
+        .filter_map(|item| item["code"].as_str())
+        .collect::<Vec<_>>();
+    if codes.contains(&"org.musha.liveOcsp.revoked") {
+        Some("revoked")
+    } else if codes.contains(&"org.musha.liveOcsp.good") {
+        Some("good")
+    } else {
+        None
+    }
+}
+fn accepted_issuer_count(validation: &Value) -> usize {
+    ["success", "informational", "failure"]
+        .iter()
+        .filter_map(|kind| validation["activeManifest"][*kind].as_array())
+        .flatten()
+        .filter(|item| item["code"].as_str() == Some("org.musha.liveOcsp.issuerGood"))
+        .count()
+}
+fn issuer_checks_complete(validation: &Value, issuer_attempts: usize) -> bool {
+    let incomplete = ["success", "informational", "failure"]
+        .iter()
+        .filter_map(|kind| validation["activeManifest"][*kind].as_array())
+        .flatten()
+        .any(|item| item["code"].as_str() == Some("org.musha.liveOcsp.issuerIncomplete"));
+    !incomplete && accepted_issuer_count(validation) == issuer_attempts
+}
 impl c2pa::http::SyncHttpResolver for OnlineResolver {
     fn http_resolve(
         &self,
@@ -115,25 +212,48 @@ impl c2pa::http::SyncHttpResolver for OnlineResolver {
     {
         use c2pa::http::http::{Method, Response};
         let state = &self.0;
+        let ocsp_kind = request
+            .headers()
+            .get("x-musha-ocsp")
+            .and_then(|h| h.to_str().ok());
+        let ocsp_request = matches!(ocsp_kind, Some("leaf" | "issuer"));
+        if ocsp_request {
+            state.ocsp_attempted.store(true, Ordering::Relaxed);
+        }
+        if ocsp_kind == Some("issuer") {
+            state.issuer_ocsp_attempts.fetch_add(1, Ordering::Relaxed);
+        }
         if state.requests.fetch_add(1, Ordering::Relaxed) >= REQUEST_LIMIT {
             return Err(state.fail("request limit exceeded"));
         }
-        if request.method() != Method::GET || !request.body().is_empty() {
-            return Err(state.fail("request rejected"));
+        if request.method() != Method::GET {
+            return Err(state.fail("request method rejected"));
+        }
+        if !request.body().is_empty() {
+            return Err(state.fail("request body rejected"));
         }
         let url = reqwest::Url::parse(&request.uri().to_string())
-            .map_err(|_| state.fail("request rejected"))?;
-        if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
-            return Err(state.fail("request rejected"));
+            .map_err(|_| state.fail("invalid request URL"))?;
+        if let Some(host) = url.host_str() {
+            state.record_host(host);
+        }
+        let leica_ocsp = url.scheme() == "http" && url.host_str() == Some("ocsp.leica.systems");
+        if url.scheme() == "http" && (!ocsp_request || !is_leica_ocsp_request(&url)) {
+            return Err(state.fail("HTTP request rejected"));
+        }
+        if url.scheme() != "https" && !leica_ocsp {
+            return Err(state.fail("request scheme rejected"));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(state.fail("request URL credentials rejected"));
         }
         let host = url
             .host_str()
-            .ok_or_else(|| state.fail("request rejected"))?
+            .ok_or_else(|| state.fail("request host missing"))?
             .to_owned();
-        state.record_host(&host);
         let port = url
             .port_or_known_default()
-            .ok_or_else(|| state.fail("request rejected"))?;
+            .ok_or_else(|| state.fail("request port missing"))?;
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let lookup_host = host.clone();
         let timeout = state.remaining()?;
@@ -197,9 +317,33 @@ impl c2pa::http::SyncHttpResolver for OnlineResolver {
         if !response.status().is_success() {
             return Err(state.fail("remote server returned an error"));
         }
+        if leica_ocsp && response.status().as_u16() != 200 {
+            return Err(state.fail("OCSP server returned an unexpected status"));
+        }
+        if leica_ocsp
+            && !response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| {
+                    value
+                        .split(';')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .eq_ignore_ascii_case("application/ocsp-response")
+                })
+        {
+            return Err(state.fail("OCSP server returned an unexpected content type"));
+        }
+        let response_limit = if leica_ocsp {
+            OCSP_RESPONSE_LIMIT
+        } else {
+            RESPONSE_LIMIT
+        };
         if response
             .content_length()
-            .is_some_and(|n| n > RESPONSE_LIMIT)
+            .is_some_and(|n| n > response_limit)
         {
             return Err(state.fail("response too large"));
         }
@@ -207,11 +351,14 @@ impl c2pa::http::SyncHttpResolver for OnlineResolver {
         let mut body = Vec::new();
         response
             .by_ref()
-            .take(RESPONSE_LIMIT + 1)
+            .take(response_limit + 1)
             .read_to_end(&mut body)
             .map_err(|_| state.fail("network response failed or timed out"))?;
-        if body.len() as u64 > RESPONSE_LIMIT {
+        if body.len() as u64 > response_limit {
             return Err(state.fail("response too large"));
+        }
+        if ocsp_kind == Some("leaf") {
+            state.leaf_ocsp_response.store(true, Ordering::Relaxed);
         }
         Ok(Response::builder()
             .status(status)
@@ -236,10 +383,12 @@ fn verify_with_resolver(
     resolver: Option<Arc<dyn c2pa::http::SyncHttpResolver>>,
 ) -> Value {
     let settings = match Settings::new()
-        .with_value("verify.verify_after_reading", true)
+        .with_value("trust.anchors", json!([{ "trust_anchors": include_str!("../trust/leica-c2pa-root.pem"), "trust_kind": "manifest", "trust_uri": "https://certs.leica.systems/cgi-bin/Leica_C2PA_Root_CA.crt" }]))
+        .and_then(|s| s.with_value("verify.verify_after_reading", true))
         .and_then(|s| s.with_value("verify.verify_trust", false))
         .and_then(|s| s.with_value("verify.verify_timestamp_trust", false))
         .and_then(|s| s.with_value("verify.ocsp_fetch", online))
+        .and_then(|s| s.with_value("verify.ocsp_fetch_should_override", online))
         .and_then(|s| s.with_value("verify.remote_manifest_fetch", online))
     {
         Ok(s) => s,
@@ -308,7 +457,7 @@ fn verify_with_resolver(
             } else {
                 "unknown"
             };
-            json!({"status":"present", "signature":signature, "integrity":integrity, "claim_integrity":claim_integrity, "trust":"unknown", "online":online, "trust_list":null, "verified_at_unix":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs()), "library":"c2pa-rs 0.91.7", "validation_state":format!("{:?}",reader.validation_state()), "validation_results":validation, "manifest":report})
+            json!({"status":"present", "signature":signature, "integrity":integrity, "claim_integrity":claim_integrity, "trust":"unknown", "online":online, "trust_list":null, "verified_at_unix":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs()), "library":"c2pa-rs 0.91.10", "validation_state":format!("{:?}",reader.validation_state()), "validation_results":validation, "manifest":report})
         }
         Err(e) => {
             let status = match &e {
@@ -317,7 +466,7 @@ fn verify_with_resolver(
                 Error::RemoteManifestUrl(_) | Error::RemoteManifestFetch(_) => "remote",
                 _ => "error",
             };
-            json!({"status":status, "signature":"unknown", "integrity":"unknown", "trust":"unknown", "online":online, "trust_list":null, "library":"c2pa-rs 0.91.7", "error":e.to_string(), "error_code":format!("{:?}",e)})
+            json!({"status":status, "signature":"unknown", "integrity":"unknown", "trust":"unknown", "online":online, "trust_list":null, "library":"c2pa-rs 0.91.10", "error":e.to_string(), "error_code":format!("{:?}",e)})
         }
     };
     if online {
@@ -330,12 +479,38 @@ fn verify_with_resolver(
             || validation_text.contains("fetch_error")
             || validation_text.contains("fetchFailed");
         let attempted = online_state.requests.load(Ordering::Relaxed) > 0;
-        value["online_complete"] =
-            json!(attempted && error.is_none() && !status_failure && !validation_unavailable);
-        value["online_error"] = json!(error.or(if status_failure || validation_unavailable {
-            Some("online verification incomplete")
-        } else if !attempted {
+        let ocsp_attempted = online_state.ocsp_attempted.load(Ordering::Relaxed);
+        let ocsp_status = if online_state.leaf_ocsp_response.load(Ordering::Relaxed) {
+            live_ocsp_status(&value["validation_results"])
+        } else {
+            None
+        };
+        let ocsp_accepted = ocsp_attempted && ocsp_status.is_some();
+        let issuer_attempts = online_state.issuer_ocsp_attempts.load(Ordering::Relaxed);
+        let issuer_checks_complete =
+            issuer_checks_complete(&value["validation_results"], issuer_attempts);
+        value["online_complete"] = json!(
+            attempted
+                && error.is_none()
+                && !status_failure
+                && !validation_unavailable
+                && ocsp_accepted
+                && issuer_checks_complete
+        );
+        value["online_ocsp_attempted"] = json!(ocsp_attempted);
+        value["online_ocsp_status"] = if ocsp_attempted {
+            json!(ocsp_status.unwrap_or("unknown"))
+        } else {
+            Value::Null
+        };
+        value["online_error"] = json!(error.or(if !attempted && !status_failure {
             Some("No network lookup was requested; revocation and trust are unconfirmed")
+        } else if status_failure
+            || validation_unavailable
+            || !ocsp_accepted
+            || !issuer_checks_complete
+        {
+            Some("online verification incomplete")
         } else {
             None
         }));
@@ -411,6 +586,236 @@ pub unsafe extern "C" fn musha_c2pa_free(value: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    fn request_der(name_hash: u8) -> Vec<u8> {
+        fn seq(bytes: &[u8]) -> Vec<u8> {
+            let mut result = vec![0x30, bytes.len() as u8];
+            result.extend_from_slice(bytes);
+            result
+        }
+        let mut id = vec![0x30, 9, 6, 5, 0x2b, 0x0e, 3, 2, 0x1a, 5, 0, 4, 20];
+        id.extend_from_slice(&[name_hash; 20]);
+        id.extend_from_slice(&[4, 20]);
+        id.extend_from_slice(&[0xff; 20]);
+        id.extend_from_slice(&[2, 1, 42]);
+        seq(&seq(&seq(&seq(&seq(&id)))))
+    }
+
+    #[test]
+    fn leica_http_is_limited_to_canonical_single_cert_requests() {
+        let valid = STANDARD.encode(request_der(0xab));
+        let parse = |s: &str| reqwest::Url::parse(s).unwrap();
+        assert!(valid.contains('/'));
+        assert!(is_leica_ocsp_request(&parse(&format!(
+            "http://ocsp.leica.systems/{valid}"
+        ))));
+        let state = Arc::new(OnlineState::default());
+        let resolver = OnlineResolver(state.clone());
+        use c2pa::http::SyncHttpResolver;
+        let unmarked = c2pa::http::http::Request::get(format!("http://ocsp.leica.systems/{valid}"))
+            .body(Vec::new())
+            .unwrap();
+        assert!(resolver.http_resolve(unmarked).is_err());
+        assert_eq!(*state.error.lock().unwrap(), Some("HTTP request rejected"));
+        // Intermediate issuers can have different hashes; all hashes are exactly 20 bytes.
+        let other_issuer = STANDARD.encode(request_der(0x12));
+        assert!(is_leica_ocsp_request(&parse(&format!(
+            "http://ocsp.leica.systems/{other_issuer}"
+        ))));
+        for url in [
+            format!("http://example.com/{valid}"),
+            format!("http://ocsp.leica.systems.evil.example/{valid}"),
+            format!("http://ocsp.leica.systems:81/{valid}"),
+            format!("http://user@ocsp.leica.systems/{valid}"),
+            format!("http://ocsp.leica.systems/{valid}?secret=hidden"),
+            format!("http://ocsp.leica.systems/{valid}#fragment"),
+            format!("http://ocsp.leica.systems/{valid}/extra"),
+            format!("http://ocsp.leica.systems/{}", valid.trim_end_matches('=')),
+        ] {
+            assert!(!is_leica_ocsp_request(&parse(&url)), "{url}");
+        }
+        let mut malformed = request_der(1);
+        malformed.push(0);
+        assert!(!is_leica_ocsp_request(&parse(&format!(
+            "http://ocsp.leica.systems/{}",
+            STANDARD.encode(malformed)
+        ))));
+        assert!(!is_leica_ocsp_request(&parse(&format!(
+            "http://ocsp.leica.systems/{}",
+            "A".repeat(2049)
+        ))));
+        let mut zero_serial = request_der(1);
+        *zero_serial.last_mut().unwrap() = 0;
+        assert!(!is_leica_ocsp_request(&parse(&format!(
+            "http://ocsp.leica.systems/{}",
+            STANDARD.encode(zero_serial)
+        ))));
+    }
+
+    #[test]
+    fn stapled_status_alone_never_proves_live_response_accepted() {
+        let fallback =
+            json!({"activeManifest": {"success": [{"code": "signingCredential.ocsp.notRevoked"}]}});
+        assert_eq!(live_ocsp_status(&fallback), None);
+        assert_eq!(accepted_issuer_count(&fallback), 0);
+        let two_issuers = json!({"activeManifest":{"informational":[{"code":"org.musha.liveOcsp.issuerGood"}, {"code":"org.musha.liveOcsp.issuerGood"}]}});
+        assert_eq!(accepted_issuer_count(&two_issuers), 2);
+        assert_ne!(accepted_issuer_count(&two_issuers), 3);
+        assert!(issuer_checks_complete(&two_issuers, 2));
+        assert!(!issuer_checks_complete(&two_issuers, 3));
+        let missing_issuer = json!({"activeManifest":{"informational":[{"code":"org.musha.liveOcsp.good"}, {"code":"org.musha.liveOcsp.issuerIncomplete"}]}});
+        assert_eq!(live_ocsp_status(&missing_issuer), Some("good"));
+        assert!(!issuer_checks_complete(&missing_issuer, 0));
+        assert_eq!(
+            live_ocsp_status(
+                &json!({"activeManifest":{"informational":[{"code":"different", "explanation":"org.musha.liveOcsp.good"}]}})
+            ),
+            None
+        );
+        assert_eq!(
+            live_ocsp_status(
+                &json!({"activeManifest":{"informational":[{"code":"org.musha.liveOcsp.good"}]}})
+            ),
+            Some("good")
+        );
+        assert_eq!(
+            live_ocsp_status(
+                &json!({"activeManifest":{"informational":[{"code":"org.musha.liveOcsp.revoked"}]}})
+            ),
+            Some("revoked")
+        );
+    }
+    #[test]
+    fn fetched_ocsp_requires_fresh_unique_status_and_direct_issuer() {
+        let der = include_bytes!("../tests/fixtures/leica-root-ocsp.der");
+        let root = include_bytes!("../tests/fixtures/leica-root.der").to_vec();
+        let chain = vec![root.clone(), root.clone()];
+        let mut outer: rasn_ocsp::OcspResponse = rasn::der::decode(der).unwrap();
+        let response = outer.bytes.as_mut().unwrap();
+        let basic: rasn_ocsp::BasicOcspResponse = rasn::der::decode(&response.response).unwrap();
+        let now = basic.tbs_response_data.produced_at.to_utc().timestamp();
+        assert!(c2pa::musha_ocsp_tests::fresh_at(der, &chain, now));
+        assert_eq!(
+            c2pa::musha_ocsp_tests::verify_fetched(
+                der,
+                &chain,
+                include_bytes!("../trust/leica-c2pa-root.pem"),
+                now
+            ),
+            (true, true)
+        );
+        assert_eq!(
+            c2pa::musha_ocsp_tests::verify_fetched(
+                der,
+                &chain,
+                include_bytes!("../trust/leica-c2pa-root.pem"),
+                now + 3601
+            ),
+            (false, false)
+        );
+        assert!(!c2pa::musha_ocsp_tests::fresh_at(der, &chain, now - 1));
+        assert!(!c2pa::musha_ocsp_tests::fresh_at(der, &chain, now + 3601));
+        let encode = |mut basic: rasn_ocsp::BasicOcspResponse| {
+            let mut outer = outer.clone();
+            outer.bytes.as_mut().unwrap().response = rasn::der::encode(&basic).unwrap().into();
+            // Keep the closure's input owned to make individual mutations independent.
+            basic.tbs_response_data.responses.clear();
+            rasn::der::encode(&outer).unwrap()
+        };
+        let mut no_next = basic.clone();
+        no_next.tbs_response_data.responses[0].next_update = None;
+        let no_next = encode(no_next);
+        assert!(c2pa::musha_ocsp_tests::fresh_at(
+            &no_next,
+            &chain,
+            now + 86400
+        ));
+        assert!(!c2pa::musha_ocsp_tests::fresh_at(
+            &no_next,
+            &chain,
+            now + 86401
+        ));
+        let mut future_produced = basic.clone();
+        future_produced.tbs_response_data.produced_at =
+            basic.tbs_response_data.responses[0].next_update.unwrap();
+        assert!(!c2pa::musha_ocsp_tests::fresh_at(
+            &encode(future_produced),
+            &chain,
+            now
+        ));
+        for reverse in [false, true] {
+            let mut duplicate = basic.clone();
+            let mut revoked = duplicate.tbs_response_data.responses[0].clone();
+            revoked.cert_status = rasn_ocsp::CertStatus::Revoked(rasn_ocsp::RevokedInfo {
+                revocation_time: basic.tbs_response_data.produced_at,
+                revocation_reason: None,
+            });
+            duplicate.tbs_response_data.responses.push(revoked);
+            if reverse {
+                duplicate.tbs_response_data.responses.reverse();
+            }
+            let duplicate = encode(duplicate);
+            // The same count guard is used before processing a stapled response.
+            assert_eq!(
+                c2pa::musha_ocsp_tests::matching_count(&duplicate, &chain),
+                2
+            );
+            assert!(!c2pa::musha_ocsp_tests::fresh_at(&duplicate, &chain, now));
+        }
+        let responder = rasn::der::encode(&basic.certs.as_ref().unwrap()[0]).unwrap();
+        // A self-signed root needs no issuer check; a truncated non-root tail,
+        // missing chain, and an issuer with no usable response remain incomplete.
+        assert_eq!(c2pa::musha_ocsp_tests::issuer_plan(&chain), (vec![], false));
+        assert_eq!(
+            c2pa::musha_ocsp_tests::issuer_plan(&[root.clone(), responder.clone()]),
+            (vec![], true)
+        );
+        let completed = c2pa::musha_ocsp_tests::complete_chain(
+            vec![root.clone(), responder.clone()],
+            include_bytes!("../trust/leica-c2pa-root.pem"),
+        );
+        assert_eq!(
+            completed,
+            vec![root.clone(), responder.clone(), root.clone()]
+        );
+        assert_eq!(
+            c2pa::musha_ocsp_tests::issuer_plan(&completed),
+            (vec![1], false)
+        );
+        assert_eq!(
+            c2pa::musha_ocsp_tests::issuer_plan(&[root.clone()]),
+            (vec![], true)
+        );
+        assert_eq!(
+            c2pa::musha_ocsp_tests::issuer_plan(&[root.clone(), responder.clone(), root.clone()]),
+            (vec![1], false)
+        );
+        assert_eq!(c2pa::musha_ocsp_tests::issuer_result(false), (false, true));
+        assert_eq!(c2pa::musha_ocsp_tests::issuer_result(true), (true, false));
+        assert_eq!(
+            c2pa::musha_ocsp_tests::responder_chain(&responder, &chain),
+            Some(vec![responder.clone(), root.clone()])
+        );
+        let mut substituted: rasn_pkix::Certificate = rasn::der::decode(&root).unwrap();
+        let unrelated: rasn_pkix::Certificate = rasn::der::decode(&responder).unwrap();
+        // Retain the target's serial and issuer name, but replace its key without
+        // a corresponding issuer signature (a serial-substitution attack).
+        substituted.tbs_certificate.subject_public_key_info =
+            unrelated.tbs_certificate.subject_public_key_info.clone();
+        let substituted = rasn::der::encode(&substituted).unwrap();
+        assert!(
+            c2pa::musha_ocsp_tests::responder_chain(&responder, &[substituted, root.clone()])
+                .is_none()
+        );
+        let mut unrelated: rasn_pkix::Certificate = rasn::der::decode(&responder).unwrap();
+        unrelated.tbs_certificate.issuer = unrelated.tbs_certificate.subject.clone();
+        assert!(c2pa::musha_ocsp_tests::responder_chain(
+            &rasn::der::encode(&unrelated).unwrap(),
+            &chain
+        )
+        .is_none());
+    }
     enum MockResult {
         Success(Vec<u8>),
         Timeout,
@@ -582,20 +987,39 @@ mod tests {
         assert!(public_ip("2606:4700:4700::1111".parse().unwrap()));
         let state = Arc::new(OnlineState::default());
         let resolver = OnlineResolver(state.clone());
-        for request in [
-            c2pa::http::http::Request::post("https://example.com/")
-                .body(vec![1])
-                .unwrap(),
-            c2pa::http::http::Request::get("http://example.com/")
-                .body(Vec::new())
-                .unwrap(),
-            c2pa::http::http::Request::get("https://example.com/")
-                .body(vec![1])
-                .unwrap(),
+        for (request, expected) in [
+            (
+                c2pa::http::http::Request::post("https://example.com/?secret=hidden")
+                    .body(vec![1])
+                    .unwrap(),
+                "request method rejected",
+            ),
+            (
+                c2pa::http::http::Request::get("http://example.com/?secret=hidden")
+                    .body(Vec::new())
+                    .unwrap(),
+                "HTTP request rejected",
+            ),
+            (
+                c2pa::http::http::Request::get("https://example.com/?secret=hidden")
+                    .body(vec![1])
+                    .unwrap(),
+                "request body rejected",
+            ),
+            (
+                c2pa::http::http::Request::get("https://user:password@example.com/?secret=hidden")
+                    .body(Vec::new())
+                    .unwrap(),
+                "request URL credentials rejected",
+            ),
         ] {
             assert!(resolver.http_resolve(request).is_err());
+            let error = state.error.lock().unwrap();
+            assert_eq!(*error, Some(expected));
+            assert!(!error.unwrap().contains("secret"));
+            assert!(!error.unwrap().contains("password"));
         }
-        assert_eq!(*state.error.lock().unwrap(), Some("request rejected"));
+        assert_eq!(*state.hosts.lock().unwrap(), vec!["example.com"]);
     }
     #[test]
     fn signed_asset_and_tampering() {

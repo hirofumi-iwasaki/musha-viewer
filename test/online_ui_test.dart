@@ -68,6 +68,9 @@ void main() {
       findsOneWidget,
     );
     expect(find.textContaining('source image is not uploaded'), findsOneWidget);
+    expect(find.textContaining('ocsp.leica.systems'), findsOneWidget);
+    expect(find.textContaining('certificate identifiers'), findsOneWidget);
+    expect(find.textContaining('network intermediaries'), findsOneWidget);
     await tester.ensureVisible(find.text('Verify online'));
     await tester.tap(find.text('Verify online'));
     await tester.pump();

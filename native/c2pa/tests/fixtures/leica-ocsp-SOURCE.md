@@ -1,0 +1,5 @@
+`leica-root.der` is the public Leica C2PA root certificate from <https://certs.leica.systems/cgi-bin/Leica_C2PA_Root_CA.crt>, documented in `../../trust/SOURCE.md`. Its SHA-256 is `c60f849915aced77b2ac1d2b4a6d1b4bbeed6e2ebf29e1c759dba555afcaa31b`.
+
+`leica-root-ocsp.der` is the signed response to an OpenSSL-generated OCSP GET request using the public root as both issuer and target, sent to `http://ocsp.leica.systems/` on 2026-11-04 at about 05:33 UTC. The response's `producedAt` is 05:33:22 UTC. Its SHA-256 is `b881e2cba061c7a8167383aac4116ef6235889b7bd4417074fb4eb55c54c5ab3`. OpenSSL request construction is equivalent to `openssl ocsp -issuer leica-root.pem -cert leica-root.pem -reqout request.der`; the DER request is standard-base64 encoded into the GET path.
+
+The response identifies only the public root certificate's serial (`7E3DBBEF580D64C2F21379525A5ABC50`) and includes a generated nonce; it contains no image data, camera certificate, or user-specific identifier. Tests evaluate its fixed timestamps and do not contact Leica.

@@ -1,0 +1,401 @@
+// Copyright 2024 Adobe. All rights reserved.
+// This file is licensed to you under the Apache License,
+// Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+// or the MIT license (http://opensource.org/licenses/MIT),
+// at your option.
+
+// Unless required by applicable law or agreed to in writing,
+// this software is distributed on an "AS IS" BASIS, WITHOUT
+// WARRANTIES OR REPRESENTATIONS OF ANY KIND, either express or
+// implied. See the LICENSE-MIT and LICENSE-APACHE files for the
+// specific language governing permissions and limitations under
+// each license.
+
+use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(feature = "file_io")]
+use std::path::PathBuf;
+
+#[allow(unused)] // different code path for WASI
+use tempfile::{tempdir, SpooledTempFile, TempDir};
+
+#[cfg(feature = "file_io")]
+use crate::utils::path_utils::sanitize_archive_path;
+use crate::{Error, Result};
+
+// Insert data at arbitrary location in a stream.
+// location is from the start of the source stream
+#[allow(dead_code)]
+pub(crate) fn insert_data_at<R: Read + Seek, W: Write>(
+    source: &mut R,
+    dest: &mut W,
+    location: u64,
+    data: &[u8],
+) -> Result<()> {
+    source.rewind()?;
+
+    let mut before_handle = source.take(location);
+
+    std::io::copy(&mut before_handle, dest)?;
+
+    // write out the data
+    dest.write_all(data)?;
+
+    // write out the rest of the source
+    let source = before_handle.into_inner();
+    source.seek(SeekFrom::Start(location))?;
+    std::io::copy(source, dest)?;
+
+    Ok(())
+}
+
+// Replace data at arbitrary location and len in a stream.
+// start_location is where the replacement data will start
+// replace_len is how many bytes from source to replaced starting a start_location
+// data is the data that will be inserted at start_location
+#[allow(dead_code)]
+pub(crate) fn patch_stream<R: Read + Seek + ?Sized, W: Write + ?Sized>(
+    source: &mut R,
+    dest: &mut W,
+    start_location: u64,
+    replace_len: u64,
+    data: &[u8],
+) -> Result<()> {
+    source.rewind()?;
+    let source_len = stream_len(source)?;
+
+    if start_location + replace_len > source_len {
+        return Err(Error::BadParam("read past end of source stream".into()));
+    }
+
+    let mut before_handle = source.take(start_location);
+
+    // copy data before start location
+    std::io::copy(&mut before_handle, dest)?;
+
+    // write out new data
+    dest.write_all(data)?;
+
+    // write out the rest of the source skipping the bytes we wanted to replace
+    let source = before_handle.into_inner();
+    source.seek(SeekFrom::Start(start_location + replace_len))?;
+    std::io::copy(source, dest)?;
+
+    Ok(())
+}
+
+// Returns length of the stream, stream position is preserved
+#[allow(dead_code)]
+pub(crate) fn stream_len<R: Read + Seek + ?Sized>(reader: &mut R) -> Result<u64> {
+    let old_pos = reader.stream_position()?;
+    let len = reader.seek(SeekFrom::End(0))?;
+
+    if old_pos != len {
+        reader.seek(SeekFrom::Start(old_pos))?;
+    }
+
+    Ok(len)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn stream_with_fs_fallback(
+    _threshold_mb: usize,
+    _expected_size_bytes: u64,
+) -> Result<impl Read + Write + Seek> {
+    Ok(std::io::Cursor::new(Vec::new()))
+}
+
+/// Will create a [`Read`]-, [`Write`]-, and [`Seek`]-capable stream that will
+/// stay in memory unless a threshold size is exceeded.
+///
+/// # Parameters
+/// - `threshold`: Size (in MB) of stream beyond which an on-disk stream will be used.
+///   This threshold should be the one specified in settings under
+///   `core.backing_store_memory_threshold_in_mb`.
+/// - `expected_size_bytes`: Size (in bytes) of the stream. If this exceeds the threshold
+///   it will return a file-backed stream directly.
+///
+/// # Errors
+/// - Returns an error if the threshold value from settings is not valid.
+///
+/// # Note
+/// This will always return an in-memory stream when the compilation target doesn't
+/// support file I/O.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn stream_with_fs_fallback(
+    threshold_mb: usize,
+    expected_size_bytes: u64,
+) -> Result<impl Read + Write + Seek> {
+    let threshold_bytes = threshold_mb.saturating_mul(1024 * 1024);
+    let mut spooled = SpooledTempFile::new(threshold_bytes);
+    if expected_size_bytes > threshold_bytes as u64 {
+        spooled.roll()?;
+    }
+    Ok(spooled)
+}
+
+// Write adapter that caps output at `max_len` bytes, preventing decompression
+// bombs and similar unbounded-output attacks.
+pub(crate) struct BoundedVecWriter {
+    inner: Vec<u8>,
+    max_len: usize,
+}
+
+impl BoundedVecWriter {
+    pub(crate) fn new(max_len: usize) -> Result<Self> {
+        Ok(Self {
+            inner: safe_vec(max_len as u64, None)?,
+            max_len,
+        })
+    }
+
+    pub(crate) fn into_inner(self) -> Vec<u8> {
+        self.inner
+    }
+}
+
+impl Write for BoundedVecWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.inner.len().saturating_add(buf.len()) > self.max_len {
+            return Err(std::io::Error::other("output exceeds maximum size"));
+        }
+        self.inner.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// Returns a new Vec first making sure it can hold the desired capacity.  Fill
+// with default value if provided
+pub(crate) fn safe_vec<T: Clone>(item_cnt: u64, init_with: Option<T>) -> Result<Vec<T>> {
+    let num_items = usize::try_from(item_cnt)?;
+
+    // make sure we can allocate vec
+    let mut output: Vec<T> = Vec::new();
+    output
+        .try_reserve_exact(num_items)
+        .map_err(|_e| Error::InsufficientMemory)?;
+
+    // fill if requested
+    if let Some(i) = init_with {
+        output.resize(num_items, i);
+    }
+
+    Ok(output)
+}
+
+pub trait ReaderUtils {
+    // Reads contents from a stream making sure if can be done and will fit within available memory
+    fn read_to_vec(&mut self, data_len: u64) -> Result<Vec<u8>>;
+}
+
+// Provide implementation for any object that support Read + Seek
+impl<R: Read + Seek> ReaderUtils for R {
+    fn read_to_vec(&mut self, data_len: u64) -> Result<Vec<u8>> {
+        let old_pos = self.stream_position()?;
+        let len = self.seek(SeekFrom::End(0))?;
+
+        // reset seek pointer
+        if old_pos != len {
+            self.seek(SeekFrom::Start(old_pos))?;
+        }
+
+        if old_pos
+            .checked_add(data_len)
+            .ok_or(Error::BadParam("source stream read out of range".into()))?
+            > len
+        {
+            return Err(Error::BadParam("read past end of source stream".into()));
+        }
+
+        // make sure we can allocate vec
+        let mut output: Vec<u8> = safe_vec(data_len, None)?;
+
+        self.take(data_len).read_to_end(&mut output)?;
+
+        Ok(output)
+    }
+}
+
+#[allow(dead_code)] // used in tests
+pub(crate) fn tempdirectory() -> Result<TempDir> {
+    #[cfg(target_os = "wasi")]
+    return TempDir::new_in("/").map_err(Error::IoError);
+
+    #[cfg(not(target_os = "wasi"))]
+    return tempdir().map_err(Error::IoError);
+}
+
+/// Convert a URI to a file path using PathBuf for better path handling.
+///
+/// The URI may carry a JUMBF label taken directly from an untrusted asset
+/// (see callers in `Reader::to_folder`, which writes the resulting path to
+/// disk), so the derived path is passed through `sanitize_archive_path`
+/// before being returned - this rejects `..`, absolute paths, and backslash
+/// components (harmless `.` components are silently dropped, same as any
+/// normal path normalization).
+#[cfg(feature = "file_io")]
+pub fn uri_to_path(uri: &str, manifest_label: Option<&str>) -> Result<PathBuf> {
+    let mut path_str = uri.replace(':', "_");
+    if let Some(stripped) = path_str.strip_prefix("self#jumbf=") {
+        path_str = stripped.to_owned();
+    } else {
+        return sanitize_archive_path(&path_str).map(PathBuf::from);
+    }
+
+    if let Some(stripped) = path_str.strip_prefix("/c2pa/") {
+        path_str = stripped.to_owned();
+    } else if let Some(manifest_label) = manifest_label {
+        // Joined with an explicit `/`, not `PathBuf::push`: on Windows, `push`
+        // inserts `\`, which would mix with the `/`-separated tail and get
+        // rejected below as if it were a backslash-traversal payload.
+        path_str = format!("{}/{path_str}", manifest_label.replace(':', "_"));
+    }
+
+    sanitize_archive_path(&path_str).map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+    #![allow(clippy::unwrap_used)]
+
+    use std::io::Cursor;
+
+    #[cfg(feature = "file_io")]
+    #[test]
+    fn test_uri_to_path() {
+        let uri = "self#jumbf=/c2pa/urn:uuid:b3386820-9994-4b58-926f-1c47b82504c4:contentauth/c2pa.assertions/c2pa.thumbnail.claim.jpeg";
+        let expected_path = "urn_uuid_b3386820-9994-4b58-926f-1c47b82504c4_contentauth/c2pa.assertions/c2pa.thumbnail.claim.jpeg";
+
+        assert_eq!(
+            uri_to_path(uri, None).unwrap(),
+            PathBuf::from(expected_path)
+        );
+        assert_eq!(
+            uri_to_path(expected_path, None).unwrap(),
+            PathBuf::from(expected_path)
+        );
+
+        let uri = "self#jumbf=c2pa.assertions/c2pa.thumbnail.claim";
+        let manifest_label = "test";
+        let expected_path = format!("{manifest_label}/c2pa.assertions/c2pa.thumbnail.claim");
+
+        assert_eq!(
+            uri_to_path(uri, Some(manifest_label)).unwrap(),
+            PathBuf::from(&expected_path)
+        );
+        assert_eq!(
+            uri_to_path(&expected_path, Some(manifest_label)).unwrap(),
+            PathBuf::from(expected_path)
+        );
+
+        // Test manifest label with colon replacement
+        let uri = "self#jumbf=c2pa.assertions/c2pa.thumbnail.claim";
+        let manifest_label_with_colon = "urn:uuid:test:label";
+        let expected_path_with_colon = "urn_uuid_test_label/c2pa.assertions/c2pa.thumbnail.claim";
+
+        assert_eq!(
+            uri_to_path(uri, Some(manifest_label_with_colon)).unwrap(),
+            PathBuf::from(expected_path_with_colon)
+        );
+    }
+
+    /// `uri_to_path` builds a path that callers (`Reader::to_folder`) write
+    /// directly to disk from a URI that may embed an untrusted JUMBF label
+    /// (an assertion or databox label read straight from an attacker-crafted
+    /// asset). It must reject traversal wherever that label can land: in the
+    /// URI's own tail, and in the `manifest_label` prefix.
+    #[cfg(feature = "file_io")]
+    #[test]
+    fn test_uri_to_path_rejects_traversal() {
+        // `..` in the databox/assertion label itself (the URI tail).
+        let uri = "self#jumbf=/c2pa/test-manifest/c2pa.databoxes/../../../evil";
+        assert!(uri_to_path(uri, None).is_err());
+
+        // `..` in the manifest_label used to prefix a bare (no `/c2pa/`) URI.
+        let uri = "self#jumbf=c2pa.databoxes/evil";
+        assert!(uri_to_path(uri, Some("../../etc")).is_err());
+
+        // A bare (no `self#jumbf=` prefix) absolute path must also be rejected -
+        // this is the early-return branch, which skips straight to
+        // `sanitize_archive_path` on the raw string.
+        assert!(uri_to_path("/etc/passwd", None).is_err());
+
+        // Backslash (Windows-style traversal), same early-return branch.
+        assert!(uri_to_path("..\\..\\evil", None).is_err());
+
+        // Legitimate labels must still work (not over-blocked).
+        let uri = "self#jumbf=/c2pa/test-manifest/c2pa.databoxes/my-databox.bin";
+        assert_eq!(
+            uri_to_path(uri, None).unwrap(),
+            PathBuf::from("test-manifest/c2pa.databoxes/my-databox.bin")
+        );
+    }
+
+    //use env_logger;
+    use super::*;
+    #[test]
+    fn test_patch_stream() {
+        let source = "this is a very very good test";
+
+        // test truncation
+        let mut output = Vec::new();
+        patch_stream(&mut Cursor::new(source.as_bytes()), &mut output, 10, 5, &[]).unwrap();
+        assert_eq!(&output, "this is a very good test".as_bytes());
+
+        // test truncation with new data
+        let mut output = Vec::new();
+        patch_stream(
+            &mut Cursor::new(source.as_bytes()),
+            &mut output,
+            10,
+            14,
+            "so so".as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(&output, "this is a so so test".as_bytes());
+
+        // test insertion, leaving existing data
+        let mut output = Vec::new();
+        patch_stream(
+            &mut Cursor::new(source.as_bytes()),
+            &mut output,
+            10,
+            0,
+            "very ".as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(&output, "this is a very very very good test".as_bytes());
+
+        // test replacement of data
+        let mut output = Vec::new();
+        patch_stream(
+            &mut Cursor::new(source.as_bytes()),
+            &mut output,
+            0,
+            29,
+            "all new data".as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(&output, "all new data".as_bytes());
+
+        // test removal of all data
+        let mut output = Vec::new();
+        patch_stream(&mut Cursor::new(source.as_bytes()), &mut output, 0, 29, &[]).unwrap();
+        assert_eq!(&output, "".as_bytes());
+
+        // test replacement of too much data
+        let mut output = Vec::new();
+        assert!(patch_stream(
+            &mut Cursor::new(source.as_bytes()),
+            &mut output,
+            10,
+            29,
+            &[],
+        )
+        .is_err());
+    }
+}

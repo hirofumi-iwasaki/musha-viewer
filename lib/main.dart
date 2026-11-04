@@ -868,7 +868,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
                 ),
                 Text('Signature: ${result['signature'] ?? 'unknown'}'),
                 Text(
-                  'Trust: ${result['trust'] ?? 'unknown'} (no trust list configured)',
+                  'Trust: ${result['trust'] ?? 'unknown'} (no general C2PA trust list configured)',
                 ),
                 const Text('Offline verification: no online lookup'),
                 if (result['error'] != null)
@@ -902,9 +902,11 @@ class _ViewerScreenState extends State<ViewerScreen> {
                 'resources referenced by the credentials, including OCSP '
                 'requests that may encode certificate information. Remote '
                 'servers can see your IP address, and requested URLs may '
-                'contain identifiers. Only HTTPS requests are allowed, so '
-                'some checks may be unavailable. Your source image is not '
-                'uploaded.',
+                'contain identifiers. HTTPS GET is allowed; plain HTTP is allowed '
+                'only for a strict OCSP request to ocsp.leica.systems. Leica '
+                'can see your IP address and certificate identifiers. The HTTP '
+                'request is unencrypted, so network intermediaries can also '
+                'see certificate identifiers. Your source image is not uploaded.',
               ),
               Align(
                 alignment: Alignment.centerLeft,
@@ -948,7 +950,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
                 ),
                 Text('Online signature: ${online['signature'] ?? 'unknown'}'),
                 Text(
-                  'Online trust: ${online['trust'] ?? 'unknown'} (no trust list configured)',
+                  'Online trust: ${online['trust'] ?? 'unknown'} (no general C2PA trust list configured)',
                 ),
                 if (online['error'] != null)
                   SelectableText('Online error: ${online['error']}'),

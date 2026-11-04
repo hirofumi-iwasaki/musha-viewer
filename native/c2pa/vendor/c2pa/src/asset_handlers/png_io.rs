@@ -1,0 +1,1104 @@
+// Copyright 2022 Adobe. All rights reserved.
+// This file is licensed to you under the Apache License,
+// Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+// or the MIT license (http://opensource.org/licenses/MIT),
+// at your option.
+
+// Unless required by applicable law or agreed to in writing,
+// this software is distributed on an "AS IS" BASIS, WITHOUT
+// WARRANTIES OR REPRESENTATIONS OF ANY KIND, either express or
+// implied. See the LICENSE-MIT and LICENSE-APACHE files for the
+// specific language governing permissions and limitations under
+// each license.
+
+use std::io::{self, Read, Seek, SeekFrom};
+
+use byteorder::{BigEndian, ReadBytesExt};
+use png_pong::chunk::InternationalText;
+
+use crate::{
+    asset_io::{
+        AllowedExclusion, AssetBoxHash, AssetIO, BoxMap, C2paReader, C2paWriter,
+        ComposedManifestRef, ObjectLocations, ObjectType, ReadSeek, ReadWriteSeek,
+        RemoteManifestUrl, WriteXmp, C2PA_BOXHASH,
+    },
+    error::{Error, Result},
+    utils::io_utils::{patch_stream, ReaderUtils},
+};
+
+const PNG_ID: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+const CAI_CHUNK: [u8; 4] = *b"caBX";
+const IMG_HDR: [u8; 4] = *b"IHDR";
+const ITXT_CHUNK: [u8; 4] = *b"iTXt";
+const XMP_KEY: &str = "XML:com.adobe.xmp";
+const PNG_END: [u8; 4] = *b"IEND";
+const PNG_HDR_LEN: u64 = 12;
+
+static SUPPORTED_TYPES: [&str; 2] = ["png", "image/png"];
+
+#[derive(Clone, Debug)]
+struct PngChunkPos {
+    pub start: u64,
+    pub length: u32,
+    pub name: [u8; 4],
+    #[allow(dead_code)]
+    pub name_str: String,
+}
+
+impl PngChunkPos {
+    pub fn end(&self) -> u64 {
+        self.start + self.length as u64 + PNG_HDR_LEN
+    }
+}
+
+fn get_png_chunk_positions<R: Read + Seek + ?Sized>(f: &mut R) -> Result<Vec<PngChunkPos>> {
+    let current_len = f.seek(SeekFrom::End(0))?;
+    let mut chunk_positions: Vec<PngChunkPos> = Vec::new();
+
+    // move to beginning of file
+    f.rewind()?;
+
+    let mut buf4 = [0; 4];
+    let mut hdr = [0; 8];
+
+    // check PNG signature
+    f.read_exact(&mut hdr)?;
+    if hdr != PNG_ID {
+        return Err(Error::InvalidAsset(format!(
+            "invalid header: expected {PNG_ID:02X?}, got {hdr:02X?}"
+        )));
+    }
+
+    loop {
+        let current_pos = f.stream_position()?;
+
+        // read the chunk length
+        let length = f
+            .read_u32::<BigEndian>()
+            .map_err(|_err| Error::InvalidAsset("PNG out of range".to_string()))?;
+
+        // read the chunk type
+        f.read_exact(&mut buf4)
+            .map_err(|_err| Error::InvalidAsset("PNG out of range".to_string()))?;
+        let name = buf4;
+
+        // seek past data
+        f.seek(SeekFrom::Current(length as i64))
+            .map_err(|_err| Error::InvalidAsset("PNG out of range".to_string()))?;
+
+        // read crc
+        f.read_exact(&mut buf4)
+            .map_err(|_err| Error::InvalidAsset("PNG out of range".to_string()))?;
+
+        let chunk_name = String::from_utf8(name.to_vec())
+            .map_err(|_err| Error::InvalidAsset("PNG bad chunk name".to_string()))?;
+
+        let pcp = PngChunkPos {
+            start: current_pos,
+            length,
+            name,
+            name_str: chunk_name,
+        };
+
+        // add to list
+        chunk_positions.push(pcp);
+
+        // should we break the loop
+        if name == PNG_END || f.stream_position()? > current_len {
+            break;
+        }
+    }
+
+    Ok(chunk_positions)
+}
+
+fn get_cai_data<R: Read + Seek + ?Sized>(mut f: &mut R) -> Result<Vec<u8>> {
+    let ps = get_png_chunk_positions(f)?;
+
+    if ps.iter().filter(|pcp| pcp.name == CAI_CHUNK).count() > 1 {
+        return Err(Error::TooManyManifestStores);
+    }
+
+    let pcp = ps
+        .iter()
+        .find(|pcp| pcp.name == CAI_CHUNK)
+        .ok_or(Error::JumbfNotFound)?;
+
+    let length: usize = pcp.length as usize;
+
+    f.seek(SeekFrom::Start(pcp.start + 8))?; // skip ahead from chunk start + length(4) + name(4)
+
+    f.read_to_vec(length as u64)
+}
+
+/// Reads a NUL-terminated string of at most `max_read` bytes from the stream.
+///
+/// Returns the decoded string together with the total number of bytes consumed
+/// from `asset_reader` — including the NUL terminator when one was found. The
+/// bytes-consumed count lets callers bound subsequent reads to the enclosing
+/// PNG chunk instead of trusting attacker-supplied lengths.
+fn read_string(asset_reader: &mut dyn ReadSeek, max_read: u32) -> Result<(String, u32)> {
+    let mut bytes_read: u32 = 0;
+    let mut s: Vec<u8> = Vec::with_capacity(80);
+
+    while bytes_read < max_read {
+        let c = asset_reader.read_u8()?;
+        bytes_read += 1;
+        if c == 0 {
+            break;
+        }
+        s.push(c);
+    }
+
+    Ok((String::from_utf8_lossy(&s).to_string(), bytes_read))
+}
+
+pub struct PngIO {}
+
+impl C2paReader for PngIO {
+    fn read_c2pa(&self, input_stream: &mut dyn ReadSeek) -> Result<Vec<u8>> {
+        let cai_data = get_cai_data(input_stream)?;
+        Ok(cai_data)
+    }
+
+    // Get XMP block
+    fn read_xmp(&self, mut input_stream: &mut dyn ReadSeek) -> Option<String> {
+        let ps = get_png_chunk_positions(input_stream).ok()?;
+        let mut xmp_str: Option<String> = None;
+
+        ps.iter().find(|pcp| {
+            if pcp.name == ITXT_CHUNK {
+                // seek to start of chunk
+                if input_stream.seek(SeekFrom::Start(pcp.start + 8)).is_err() {
+                    // move +8 to get past header
+                    return false;
+                }
+
+                // Track unread bytes in this iTxt chunk. Every consumed field
+                // is subtracted via `checked_sub` so a truncated/malicious
+                // chunk cannot underflow the length used for the final data
+                // read (previously crashed with "attempt to subtract with
+                // overflow" on a crafted ~70-byte PNG).
+                let mut remaining: u32 = pcp.length;
+
+                // parse the iTxt block
+                let (key, consumed) = match read_string(input_stream, remaining) {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                };
+                remaining = match remaining.checked_sub(consumed) {
+                    Some(r) => r,
+                    None => return false,
+                };
+
+                if key.is_empty() || key.len() > 79 {
+                    return false;
+                }
+
+                // is this an XMP key
+                if key != XMP_KEY {
+                    return false;
+                }
+
+                // compressed flag + compression method are one byte each;
+                // charge both against `remaining` before reading them.
+                remaining = match remaining.checked_sub(2) {
+                    Some(r) => r,
+                    None => return false,
+                };
+
+                let compressed = match input_stream.read_u8() {
+                    Ok(c) => c != 0,
+                    Err(_) => return false,
+                };
+
+                let _compression_method = match input_stream.read_u8() {
+                    Ok(c) => c != 0,
+                    Err(_) => return false,
+                };
+
+                let (_langtag, consumed) = match read_string(input_stream, remaining) {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                };
+                remaining = match remaining.checked_sub(consumed) {
+                    Some(r) => r,
+                    None => return false,
+                };
+
+                let (_transkey, consumed) = match read_string(input_stream, remaining) {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                };
+                remaining = match remaining.checked_sub(consumed) {
+                    Some(r) => r,
+                    None => return false,
+                };
+
+                // read iTxt data — bounded by the actual chunk boundary
+                let data = match input_stream.read_to_vec(remaining as u64) {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                };
+
+                // convert to string, decompress if needed
+                let val = if compressed {
+                    /*  should not be needed for current XMP
+                    use flate2::read::GzDecoder;
+
+                    let cursor = Cursor::new(data);
+
+                    let mut d = GzDecoder::new(cursor);
+                    let mut s = String::new();
+                    if d.read_to_string(&mut s).is_err() {
+                        return false;
+                    }
+                    s
+                    */
+                    return false;
+                } else {
+                    String::from_utf8_lossy(&data).to_string()
+                };
+
+                xmp_str = Some(val);
+
+                true
+            } else {
+                false
+            }
+        });
+
+        xmp_str
+    }
+}
+
+impl C2paWriter for PngIO {
+    fn write_c2pa(
+        &self,
+        input_stream: &mut dyn ReadSeek,
+        output_stream: &mut dyn ReadWriteSeek,
+        store_bytes: &[u8],
+    ) -> Result<()> {
+        let mut c2pa_data = Vec::new();
+        let mut c2pa_encoder = png_pong::Encoder::new(&mut c2pa_data).into_chunk_enc();
+
+        let mut c2pa_chunk = png_pong::chunk::Chunk::Unknown(png_pong::chunk::Unknown {
+            name: CAI_CHUNK,
+            data: store_bytes.to_vec(),
+        });
+        c2pa_encoder
+            .encode(&mut c2pa_chunk)
+            .map_err(|_| Error::EmbeddingError)?;
+
+        input_stream.rewind()?;
+        let ps = get_png_chunk_positions(input_stream)?;
+
+        let ihdr_end = ps
+            .iter()
+            .find(|pcp| pcp.name == IMG_HDR)
+            .ok_or(Error::EmbeddingError)?
+            .end();
+
+        let existing_c2pa_position = ps
+            .iter()
+            .find(|pcp| pcp.name == CAI_CHUNK)
+            .map(|pcp| (pcp.start, pcp.end()));
+
+        input_stream.rewind()?;
+        output_stream.rewind()?;
+
+        /*  splice in new chunk.  Each PNG chunk has the following format:
+                chunk data length (4 bytes big endian)
+                chunk identifier (4 byte character sequence)
+                chunk data (0 - n bytes of chunk data)
+                chunk crc (4 bytes in crc in format defined in PNG spec)
+        */
+
+        match existing_c2pa_position {
+            // existing caBX is before IHDR, remove it and insert after IHDR
+            Some((c2pa_start, c2pa_end)) if c2pa_end <= ihdr_end => {
+                io::copy(&mut input_stream.take(c2pa_start), output_stream)?;
+                input_stream.seek(SeekFrom::Start(c2pa_end))?;
+                io::copy(&mut input_stream.take(ihdr_end - c2pa_end), output_stream)?;
+                output_stream.write_all(&c2pa_data)?;
+                io::copy(input_stream, output_stream)?;
+            }
+            // existing caBX is after IHDR, insert new caBX after IHDR and skip the old
+            Some((c2pa_start, c2pa_end)) => {
+                io::copy(&mut input_stream.take(ihdr_end), output_stream)?;
+                output_stream.write_all(&c2pa_data)?;
+                io::copy(&mut input_stream.take(c2pa_start - ihdr_end), output_stream)?;
+                input_stream.seek(SeekFrom::Start(c2pa_end))?;
+                io::copy(input_stream, output_stream)?;
+            }
+            // no existing caBX, insert after IHDR
+            None => {
+                io::copy(&mut input_stream.take(ihdr_end), output_stream)?;
+                output_stream.write_all(&c2pa_data)?;
+                io::copy(input_stream, output_stream)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_object_locations(
+        &self,
+        input_stream: &mut dyn ReadSeek,
+    ) -> Result<Vec<ObjectLocations>> {
+        let mut positions: Vec<ObjectLocations> = Vec::new();
+
+        input_stream.rewind()?;
+        let mut ps = get_png_chunk_positions(input_stream)?;
+
+        let (ps, file_end) = if ps.iter().any(|chunk| chunk.name == CAI_CHUNK) {
+            let file_end = input_stream.seek(SeekFrom::End(0))?;
+            (ps, file_end)
+        } else {
+            let ihdr_index = ps
+                .iter()
+                .position(|c| c.name == IMG_HDR)
+                .ok_or(Error::EmbeddingError)?;
+
+            ps.insert(
+                ihdr_index + 1,
+                PngChunkPos {
+                    start: ps[ihdr_index].end(),
+                    length: 0,
+                    name: CAI_CHUNK,
+                    name_str: String::from_utf8_lossy(&CAI_CHUNK).into_owned(),
+                },
+            );
+
+            let file_end = input_stream.seek(SeekFrom::End(0))?;
+            (ps, file_end + PNG_HDR_LEN)
+        };
+
+        let pcp = ps
+            .into_iter()
+            .find(|pcp| pcp.name == CAI_CHUNK)
+            .ok_or(Error::JumbfNotFound)?;
+
+        let cai_offset = pcp.start;
+        let cai_length = pcp.length as u64 + PNG_HDR_LEN;
+        let end = pcp.end();
+
+        positions.push(ObjectLocations {
+            offset: cai_offset,
+            length: cai_length,
+            htype: ObjectType::C2pa,
+        });
+
+        // add hash of chunks before cai
+        positions.push(ObjectLocations {
+            offset: 0,
+            length: cai_offset,
+            htype: ObjectType::Other,
+        });
+
+        // add position from cai to end
+        positions.push(ObjectLocations {
+            offset: end, // len of cai
+            length: file_end - end,
+            htype: ObjectType::Other,
+        });
+
+        Ok(positions)
+    }
+
+    fn remove_c2pa(
+        &self,
+        input_stream: &mut dyn ReadSeek,
+        output_stream: &mut dyn ReadWriteSeek,
+    ) -> Result<()> {
+        let ps = get_png_chunk_positions(input_stream)?;
+        let existing_c2pa = ps.iter().find(|pcp| pcp.name == CAI_CHUNK);
+
+        input_stream.rewind()?;
+
+        /*  splice in new chunk.  Each PNG chunk has the following format:
+                chunk data length (4 bytes big endian)
+                chunk identifier (4 byte character sequence)
+                chunk data (0 - n bytes of chunk data)
+                chunk crc (4 bytes in crc in format defined in PNG spec)
+        */
+
+        match existing_c2pa {
+            Some(c2pa) => {
+                patch_stream(
+                    input_stream,
+                    output_stream,
+                    c2pa.start,
+                    c2pa.end() - c2pa.start,
+                    &[],
+                )?;
+            }
+            None => {
+                io::copy(input_stream, output_stream)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl AssetIO for PngIO {
+    fn new(_asset_type: &str) -> Self
+    where
+        Self: Sized,
+    {
+        PngIO {}
+    }
+
+    fn get_handler(&self, asset_type: &str) -> Box<dyn AssetIO> {
+        Box::new(PngIO::new(asset_type))
+    }
+
+    fn get_reader(&self) -> &dyn C2paReader {
+        self
+    }
+
+    fn get_writer(&self, asset_type: &str) -> Option<Box<dyn C2paWriter>> {
+        Some(Box::new(PngIO::new(asset_type)))
+    }
+
+    fn remote_manifest_url_ref(&self) -> Option<&dyn RemoteManifestUrl> {
+        Some(self)
+    }
+
+    fn write_xmp_ref(&self) -> Option<&dyn WriteXmp> {
+        Some(self)
+    }
+
+    fn asset_box_hash_ref(&self) -> Option<&dyn AssetBoxHash> {
+        Some(self)
+    }
+
+    fn composed_data_ref(&self) -> Option<&dyn ComposedManifestRef> {
+        Some(self)
+    }
+
+    fn supported_types(&self) -> &[&str] {
+        &SUPPORTED_TYPES
+    }
+}
+
+fn get_xmp_insertion_point(asset_reader: &mut dyn ReadSeek) -> Option<(u64, u32)> {
+    let ps = get_png_chunk_positions(asset_reader).ok()?;
+
+    let xmp_box = ps.iter().find(|pcp| {
+        if pcp.name == ITXT_CHUNK {
+            // seek to start of chunk
+            if asset_reader.seek(SeekFrom::Start(pcp.start + 8)).is_err() {
+                // move +8 to get past header
+                return false;
+            }
+
+            // parse the iTxt block
+            if let Ok((key, _consumed)) = read_string(asset_reader, pcp.length) {
+                if key.is_empty() || key.len() > 79 {
+                    return false;
+                }
+
+                // is this an XMP key
+                if key == XMP_KEY {
+                    return true;
+                }
+            }
+            false
+        } else {
+            false
+        }
+    });
+
+    if let Some(xmp) = xmp_box {
+        // overwrite existing box
+        Some((xmp.start, xmp.length.checked_add(PNG_HDR_LEN as u32)?))
+    } else {
+        // insert after IHDR
+        ps.iter()
+            .find(|png_cp| png_cp.name == IMG_HDR)
+            .map(|img_hdr| (img_hdr.end(), 0))
+    }
+}
+impl WriteXmp for PngIO {
+    fn write_xmp(
+        &self,
+        input_stream: &mut dyn ReadSeek,
+        output_stream: &mut dyn ReadWriteSeek,
+        xmp: &str,
+    ) -> Result<()> {
+        input_stream.rewind()?;
+
+        // make XMP chunk
+        let mut xmp_data = Vec::new();
+        let mut xmp_encoder = png_pong::Encoder::new(&mut xmp_data).into_chunk_enc();
+
+        let mut xmp_chunk = png_pong::chunk::Chunk::InternationalText(InternationalText {
+            key: XMP_KEY.to_string(),
+            langtag: "".to_string(),
+            transkey: "".to_string(),
+            val: xmp.to_string(),
+            compressed: false,
+        });
+        xmp_encoder
+            .encode(&mut xmp_chunk)
+            .map_err(|_| Error::EmbeddingError)?;
+
+        if let Some((xmp_start, xmp_len)) = get_xmp_insertion_point(input_stream) {
+            output_stream.rewind()?;
+            patch_stream(
+                input_stream,
+                output_stream,
+                xmp_start,
+                xmp_len as u64,
+                &xmp_data,
+            )?;
+
+            Ok(())
+        } else {
+            Err(Error::EmbeddingError)
+        }
+    }
+}
+
+// A PNG chunk's `range_len` covers the 4-byte length field, 4-byte type, the
+// chunk data, and the trailing 4-byte CRC - `range_start` points at the
+// length field, not the data. The CRC covers the type and data fields (not
+// length), so it must change if the data does - the excludable range has to
+// include it too, or any legitimate metadata edit (which necessarily also
+// updates the CRC) would leave the new CRC bytes hashed and fail
+// verification. So a chunk's own excludable range is `[8, range_len)`,
+// box-relative: skip only the 8-byte length+type header.
+fn classify_png_allowed_exclusions(name: &str, range_len: u64) -> Vec<AllowedExclusion> {
+    match name {
+        C2PA_BOXHASH => vec![AllowedExclusion::whole_box(range_len)],
+        "eXIf" | "iTXt" | "tEXt" | "zTXt" => vec![AllowedExclusion::after_header(8, range_len)],
+        _ => Vec::new(),
+    }
+}
+
+impl AssetBoxHash for PngIO {
+    fn get_box_map(&self, input_stream: &mut dyn ReadSeek) -> Result<Vec<BoxMap>> {
+        input_stream.rewind()?;
+
+        let ps = get_png_chunk_positions(input_stream)?;
+
+        let has_c2pa = ps.iter().any(|pc| pc.name == CAI_CHUNK);
+
+        let mut box_maps = Vec::new();
+
+        // add PNGh header
+        box_maps.push(
+            BoxMap::new(vec!["PNGh".to_string()], 0, 8)
+                .with_allowed_exclusions(classify_png_allowed_exclusions("PNGh", 8)),
+        );
+
+        // add the other boxes
+        for pc in ps.into_iter() {
+            // add special C2PA box
+            if pc.name == CAI_CHUNK {
+                let range_len = pc.length as u64 + 12; // length(4) + name(4) + crc(4)
+                box_maps.push(
+                    BoxMap::new(vec![C2PA_BOXHASH.to_string()], pc.start, range_len)
+                        .with_allowed_exclusions(classify_png_allowed_exclusions(
+                            C2PA_BOXHASH,
+                            range_len,
+                        )),
+                );
+                continue;
+            }
+
+            // all other chunks
+            let chunk_end = pc.end(); // byte immediately after this chunk
+            let is_ihdr = pc.name == IMG_HDR;
+            let range_len = pc.length as u64 + 12; // length(4) + name(4) + crc(4)
+            let allowed_exclusions = classify_png_allowed_exclusions(&pc.name_str, range_len);
+            box_maps.push(
+                BoxMap::new(vec![pc.name_str], pc.start, range_len)
+                    .with_allowed_exclusions(allowed_exclusions),
+            );
+
+            // If no C2PA chunk exists, inject a synthetic excluded placeholder
+            // immediately after IHDR (the mandatory first data chunk after the PNG
+            // signature).  PNG's CAI writer always inserts the caBX chunk at this
+            // position, so the box list will align with the embedded file during
+            // verification.  When a real C2PA chunk is present this block is skipped.
+            if !has_c2pa && is_ihdr {
+                box_maps.push(
+                    BoxMap::new(vec![C2PA_BOXHASH.to_string()], chunk_end, 0)
+                        .excluded()
+                        .with_allowed_exclusions(classify_png_allowed_exclusions(C2PA_BOXHASH, 0)),
+                );
+            }
+        }
+
+        Ok(box_maps)
+    }
+}
+
+impl ComposedManifestRef for PngIO {
+    fn compose_manifest(&self, manifest_data: &[u8], _format: &str) -> Result<Vec<u8>> {
+        let mut cai_data = Vec::new();
+        let mut cai_encoder = png_pong::Encoder::new(&mut cai_data).into_chunk_enc();
+
+        // create CAI store chunk
+        let cai_unknown = png_pong::chunk::Unknown {
+            name: CAI_CHUNK,
+            data: manifest_data.to_vec(),
+        };
+
+        let mut cai_chunk = png_pong::chunk::Chunk::Unknown(cai_unknown);
+        cai_encoder
+            .encode(&mut cai_chunk)
+            .map_err(|_| Error::EmbeddingError)?;
+
+        Ok(cai_data)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+#[allow(clippy::unwrap_used)]
+pub mod tests {
+    use std::io::{Cursor, Write};
+
+    use memchr::memmem;
+
+    use super::*;
+    use crate::{
+        assertions::ExclusionKind,
+        utils::{
+            io_utils::tempdirectory,
+            test::{self, temp_dir_path},
+        },
+    };
+
+    #[test]
+    fn test_classify_png_allowed_exclusions() {
+        // 20-byte chunk: 4-byte length + 4-byte type + 8 bytes of data + 4-byte CRC.
+        assert_eq!(
+            classify_png_allowed_exclusions(C2PA_BOXHASH, 20),
+            vec![AllowedExclusion {
+                start: 0,
+                length: 20,
+                kind: ExclusionKind::ManifestOrPadding,
+            }]
+        );
+        // length is 12 (data + trailing CRC), not 8 - the CRC covers the
+        // type and data fields, so it must be excludable too, or a
+        // legitimate metadata edit (which changes the CRC) would fail
+        // verification.
+        assert_eq!(
+            classify_png_allowed_exclusions("eXIf", 20),
+            vec![AllowedExclusion {
+                start: 8,
+                length: 12,
+                kind: ExclusionKind::AssetMetadata,
+            }]
+        );
+        assert_eq!(
+            classify_png_allowed_exclusions("tEXt", 20),
+            vec![AllowedExclusion {
+                start: 8,
+                length: 12,
+                kind: ExclusionKind::AssetMetadata,
+            }]
+        );
+        assert!(classify_png_allowed_exclusions("IHDR", 20).is_empty());
+        assert!(classify_png_allowed_exclusions("PNGh", 8).is_empty());
+        // PNG allows arbitrary private/ancillary chunks - unrecognized, not excludable.
+        assert!(classify_png_allowed_exclusions("pHYs", 20).is_empty());
+    }
+
+    #[test]
+    fn test_png_xmp() {
+        let ap = test::fixture_path("libpng-test_with_url.png");
+
+        let png_io = PngIO {};
+        let xmp = png_io
+            .read_xmp(&mut std::fs::File::open(ap).unwrap())
+            .unwrap();
+
+        // make sure we can parse it
+        let provenance = crate::utils::xmp_inmemory_utils::extract_provenance(&xmp).unwrap();
+
+        assert!(provenance.contains("libpng-test"));
+    }
+
+    #[test]
+    fn test_png_xmp_write() {
+        let ap = test::fixture_path("libpng-test.png");
+        let mut source_stream = std::fs::File::open(ap).unwrap();
+
+        let temp_dir = tempdirectory().unwrap();
+        let output = temp_dir_path(&temp_dir, "out.png");
+        let mut output_stream = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(output)
+            .unwrap();
+
+        let png_io = PngIO {};
+        //let _orig_xmp = png_io
+        //    .read_xmp(&mut source_stream )
+        //    .unwrap();
+
+        // change the xmp
+        let eh = png_io.remote_manifest_url_ref().unwrap();
+        eh.write_remote_manifest_url(&mut source_stream, &mut output_stream, "some test data")
+            .unwrap();
+
+        output_stream.rewind().unwrap();
+        let new_xmp = png_io.read_xmp(&mut output_stream).unwrap();
+        // make sure we can parse it
+        let provenance = crate::utils::xmp_inmemory_utils::extract_provenance(&new_xmp).unwrap();
+
+        assert!(provenance.contains("some test data"));
+    }
+
+    #[test]
+    fn test_png_parse() {
+        let ap = test::fixture_path("libpng-test.png");
+
+        let png_bytes = std::fs::read(&ap).unwrap();
+
+        // grab PNG chunks and positions
+        let mut f = std::fs::File::open(ap).unwrap();
+        let positions = get_png_chunk_positions(&mut f).unwrap();
+
+        for hop in positions {
+            if let Some(start) = memmem::find(&png_bytes, &hop.name) {
+                if hop.start != (start - 4) as u64 {
+                    panic!("find_bytes found the wrong position");
+                    // assert!(true);
+                }
+
+                println!(
+                    "Chunk {} position matches, start: {}, length: {} ",
+                    hop.name_str, hop.start, hop.length
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_write_cai_using_stream_existing_cai_data() {
+        let source = include_bytes!("../../tests/fixtures/exp-test1.png");
+        let mut stream = Cursor::new(source.to_vec());
+        let png_io = PngIO {};
+
+        // cai data already exists
+        assert!(matches!(
+            png_io.read_c2pa(&mut stream),
+            Ok(data) if !data.is_empty(),
+        ));
+
+        // write new data
+        let output: Vec<u8> = Vec::new();
+        let mut output_stream = Cursor::new(output);
+
+        let data_to_write: Vec<u8> = vec![0, 1, 1, 2, 3, 5, 8, 13, 21, 34];
+        assert!(png_io
+            .write_c2pa(&mut stream, &mut output_stream, &data_to_write)
+            .is_ok());
+
+        // new data replaces the existing cai data
+        let data_written = png_io.read_c2pa(&mut output_stream).unwrap();
+        assert_eq!(data_to_write, data_written);
+    }
+
+    #[test]
+    fn test_write_cai_using_stream_no_cai_data() {
+        let source = include_bytes!("../../tests/fixtures/libpng-test.png");
+        let mut stream = Cursor::new(source.to_vec());
+        let png_io = PngIO {};
+
+        // no cai data present in stream.
+        assert!(matches!(
+            png_io.read_c2pa(&mut stream),
+            Err(Error::JumbfNotFound)
+        ));
+
+        // write new data.
+        let output: Vec<u8> = Vec::new();
+        let mut output_stream = Cursor::new(output);
+
+        let data_to_write: Vec<u8> = vec![0, 1, 1, 2, 3, 5, 8, 13, 21, 34];
+        assert!(png_io
+            .write_c2pa(&mut stream, &mut output_stream, &data_to_write)
+            .is_ok());
+
+        // assert new cai data is present.
+        let data_written = png_io.read_c2pa(&mut output_stream).unwrap();
+        assert_eq!(data_to_write, data_written);
+    }
+
+    #[test]
+    fn test_write_cai_data_to_stream_wrong_format() {
+        let source = include_bytes!("../../tests/fixtures/C.jpg");
+        let mut stream = Cursor::new(source.to_vec());
+        let png_io = PngIO {};
+
+        let output: Vec<u8> = Vec::new();
+        let mut output_stream = Cursor::new(output);
+        assert!(matches!(
+            png_io.write_c2pa(&mut stream, &mut output_stream, &[]),
+            Err(Error::InvalidAsset(_))
+        ));
+    }
+
+    #[test]
+    fn test_stream_object_locations() {
+        let source = include_bytes!("../../tests/fixtures/exp-test1.png");
+        let mut stream = Cursor::new(source.to_vec());
+        let png_io = PngIO {};
+        let cai_pos = png_io
+            .get_object_locations(&mut stream)
+            .unwrap()
+            .into_iter()
+            .find(|pos| pos.htype == ObjectType::C2pa)
+            .unwrap();
+
+        assert_eq!(cai_pos.offset, 33);
+        assert_eq!(cai_pos.length, 3439701);
+    }
+
+    #[test]
+    fn test_stream_object_locations_with_incorrect_file_type() {
+        let source = include_bytes!("../../tests/fixtures/unsupported_type.txt");
+        let mut stream = Cursor::new(source.to_vec());
+        let png_io = PngIO {};
+        assert!(matches!(
+            png_io.get_object_locations(&mut stream),
+            Err(Error::InvalidAsset(_))
+        ));
+    }
+
+    #[test]
+    fn test_stream_object_locations_adds_offsets_to_file_without_claims() {
+        let source = include_bytes!("../../tests/fixtures/libpng-test.png");
+        let mut stream = Cursor::new(source.to_vec());
+
+        let png_io = PngIO {};
+        assert!(png_io
+            .get_object_locations(&mut stream)
+            .unwrap()
+            .into_iter()
+            .any(|chunk| chunk.htype == ObjectType::C2pa));
+    }
+
+    #[test]
+    fn test_remove_c2pa() {
+        let source = test::fixture_path("exp-test1.png");
+        let temp_dir = tempdirectory().unwrap();
+        let output = test::temp_dir_path(&temp_dir, "exp-test1_tmp.png");
+        std::fs::copy(source, &output).unwrap();
+
+        let png_io = PngIO {};
+        png_io.remove_c2pa_store(&output).unwrap();
+
+        // read back in asset, JumbfNotFound is expected since it was removed
+        let mut file_reader = std::fs::File::open(&output).unwrap();
+        match png_io.read_c2pa(&mut file_reader) {
+            Err(Error::JumbfNotFound) => (),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_remove_c2pa_from_stream() {
+        let source = crate::utils::test::fixture_path("exp-test1.png");
+
+        let source_bytes = std::fs::read(source).unwrap();
+        let mut source_stream = Cursor::new(source_bytes);
+
+        let png_io = PngIO {};
+        let png_writer = png_io.get_writer("png").unwrap();
+
+        let output_bytes = Vec::new();
+        let mut output_stream = Cursor::new(output_bytes);
+
+        png_writer
+            .remove_c2pa(&mut source_stream, &mut output_stream)
+            .unwrap();
+
+        // read back in asset, JumbfNotFound is expected since it was removed
+        let png_reader = png_io.get_reader();
+        match png_reader.read_c2pa(&mut output_stream) {
+            Err(Error::JumbfNotFound) => (),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_cai_chunk_length_near_u32_max_returns_error() {
+        // A CAI chunk claiming length = u32::MAX - 11 is the minimum value whose
+        // `length as usize + PNG_HDR_LEN(12)` overflows usize on 32-bit/WASM targets.
+        // Without actual chunk data the parser hits EOF at CRC-read time, so the
+        // call must return Err — not panic — on any target width.
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(&PNG_ID);
+        // Minimal IHDR: width=1, height=1, 8-bit RGB, no interlace
+        let ihdr_payload: [u8; 13] = [0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0];
+        data.extend_from_slice(&(ihdr_payload.len() as u32).to_be_bytes());
+        data.extend_from_slice(b"IHDR");
+        data.extend_from_slice(&ihdr_payload);
+        data.extend_from_slice(&[0x90, 0x77, 0x53, 0xde]); // valid IHDR CRC
+                                                           // CAI chunk: claimed length = u32::MAX - 11 (overflows usize + 12 on 32-bit).
+                                                           // No payload follows — the parser hits EOF before recording this chunk position.
+        data.extend_from_slice(&(u32::MAX - 11).to_be_bytes());
+        data.extend_from_slice(b"caBX");
+
+        let png_io = PngIO {};
+        let mut stream = Cursor::new(data);
+        assert!(png_io.get_object_locations(&mut stream).is_err());
+    }
+
+    #[test]
+    fn test_embeddable_manifest() {
+        let png_io = PngIO {};
+
+        let source = crate::utils::test::fixture_path("exp-test1.png");
+
+        let mut source_reader = std::fs::File::open(&source).unwrap();
+        let ol = png_io.get_object_locations(&mut source_reader).unwrap();
+
+        let cai_loc = ol.iter().find(|o| o.htype == ObjectType::C2pa).unwrap();
+        let curr_manifest = png_io.read_c2pa(&mut source_reader).unwrap();
+
+        let temp_dir = tempdirectory().unwrap();
+        let output = crate::utils::test::temp_dir_path(&temp_dir, "exp-test1-out.png");
+
+        std::fs::copy(source, &output).unwrap();
+
+        // remove existing
+        png_io.remove_c2pa_store(&output).unwrap();
+
+        // generate new manifest data
+        let em = png_io
+            .composed_data_ref()
+            .unwrap()
+            .compose_manifest(&curr_manifest, "png")
+            .unwrap();
+
+        // insert new manifest
+        let outbuf = Vec::new();
+        let mut out_stream = Cursor::new(outbuf);
+
+        let mut before = vec![0u8; usize::try_from(cai_loc.offset).unwrap()];
+        let mut in_file = std::fs::File::open(&output).unwrap();
+
+        // write before
+        in_file.read_exact(before.as_mut_slice()).unwrap();
+        out_stream.write_all(&before).unwrap();
+
+        // write composed bytes
+        out_stream.write_all(&em).unwrap();
+
+        // write bytes after
+        let mut after_buf = Vec::new();
+        in_file.read_to_end(&mut after_buf).unwrap();
+        out_stream.write_all(&after_buf).unwrap();
+
+        // read manifest back in from new in-memory PNG
+        out_stream.rewind().unwrap();
+        let restored_manifest = png_io.read_c2pa(&mut out_stream).unwrap();
+
+        assert_eq!(&curr_manifest, &restored_manifest);
+    }
+
+    // Regression: a crafted iTxt chunk that claims a length just large enough
+    // to hold the XMP key + compressed/method bytes but nothing more used to
+    // panic with "attempt to subtract with overflow" — the langtag/transkey
+    // reads over-ran the chunk boundary, and their combined "length" plus the
+    // key length exceeded pcp.length in the final subtraction. The fix must
+    // surface this cleanly as `None` (no XMP found) without panicking.
+    #[test]
+    fn test_read_xmp_malformed_itxt_does_not_underflow() {
+        let mut data: Vec<u8> = Vec::new();
+
+        // PNG signature
+        data.extend_from_slice(&PNG_ID);
+
+        // Minimal IHDR chunk. CRC is not validated by get_png_chunk_positions,
+        // so any 4 trailing bytes suffice.
+        let ihdr_payload: [u8; 13] = [0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0];
+        data.extend_from_slice(&(ihdr_payload.len() as u32).to_be_bytes());
+        data.extend_from_slice(b"IHDR");
+        data.extend_from_slice(&ihdr_payload);
+        data.extend_from_slice(&[0x90, 0x77, 0x53, 0xde]);
+
+        // iTXt chunk claiming length = 18 — exactly enough to hold
+        // "XML:com.adobe.xmp\0" and nothing else. Pre-fix, reading `key`
+        // consumed all 18 declared bytes, but the parser then still tried to
+        // read compressed + compression method + langtag + transkey by
+        // over-running into CRC/IEND, and finally subtracted the inflated
+        // lengths from `pcp.length`, underflowing. Post-fix, `remaining`
+        // is 0 after the key read and the `checked_sub(2)` guard for the
+        // compressed/method bytes trips, returning None cleanly.
+        let itxt_len: u32 = 18;
+        data.extend_from_slice(&itxt_len.to_be_bytes());
+        data.extend_from_slice(b"iTXt");
+        data.extend_from_slice(b"XML:com.adobe.xmp\0"); // 18 bytes
+                                                        // Non-zero CRC bytes — pre-fix these were consumed as compressed +
+                                                        // compression method + start of langtag. Post-fix they are never
+                                                        // read because `remaining == 0` after the key.
+        data.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
+
+        // IEND
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(b"IEND");
+        data.extend_from_slice(&[0xae, 0x42, 0x60, 0x82]);
+
+        let png_io = PngIO {};
+        let mut stream = Cursor::new(data);
+        // Pre-fix: debug builds panicked with "attempt to subtract with
+        // overflow"; release builds performed a wrapped-length read.
+        // Post-fix: `checked_sub(2)` on the exhausted `remaining` counter
+        // returns None cleanly, matching the "malformed chunk" contract
+        // used elsewhere in read_xmp.
+        assert!(
+            png_io.read_xmp(&mut stream).is_none(),
+            "malformed iTxt must not yield an XMP string"
+        );
+    }
+
+    // Companion regression: an iTxt chunk claiming a length such that even
+    // reading the XMP key would exhaust the remaining budget. Verifies the
+    // first `checked_sub` guard trips cleanly (returns `None`, no panic).
+    // The malformed key does not equal `XMP_KEY` so pre-fix code exited early
+    // — this test guards against a future refactor that would re-introduce
+    // an unguarded subtraction on the key path.
+    #[test]
+    fn test_read_xmp_itxt_shorter_than_key_does_not_underflow() {
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(&PNG_ID);
+
+        let ihdr_payload: [u8; 13] = [0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0];
+        data.extend_from_slice(&(ihdr_payload.len() as u32).to_be_bytes());
+        data.extend_from_slice(b"IHDR");
+        data.extend_from_slice(&ihdr_payload);
+        data.extend_from_slice(&[0x90, 0x77, 0x53, 0xde]);
+
+        // iTXt length=5 — smaller than the XMP key. Any post-fix reader
+        // truncates the key (bounded read_string) so the key comparison fails
+        // and read_xmp returns None cleanly; the pre-fix reader would still
+        // scan past the boundary via successive unbounded read_string calls.
+        let itxt_len: u32 = 5;
+        data.extend_from_slice(&itxt_len.to_be_bytes());
+        data.extend_from_slice(b"iTXt");
+        data.extend_from_slice(b"XML:c"); // 5 bytes, no NUL
+        data.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(b"IEND");
+        data.extend_from_slice(&[0xae, 0x42, 0x60, 0x82]);
+
+        let png_io = PngIO {};
+        let mut stream = Cursor::new(data);
+        assert!(png_io.read_xmp(&mut stream).is_none());
+    }
+}

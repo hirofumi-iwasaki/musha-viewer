@@ -84,6 +84,40 @@ void main() {
     });
   });
 
+  for (final (ocsp, expected) in [
+    (
+      'good',
+      'Live certificate revocation check passed; overall trust remains unknown',
+    ),
+    ('revoked', 'Live Leica revocation check: revoked; trust remains unknown'),
+    (
+      'unknown',
+      'Requested network resources retrieved; trust and revocation remain unconfirmed',
+    ),
+  ]) {
+    testWidgets('completed online check reports $ocsp accurately', (
+      tester,
+    ) async {
+      await tester.runAsync(() async {
+        final service = _OnlineService(
+          File('test/fixtures/exif.jpg').readAsBytesSync(),
+        );
+        final controller = ViewerController(service);
+        await controller.open('present.jpg');
+        final check = controller.verifyOnline();
+        await service.started.future;
+        service.response.complete({
+          'status': 'present',
+          'online_complete': true,
+          'online_ocsp_status': ocsp,
+        });
+        await check;
+        expect(controller.onlineStatus, expected);
+        controller.dispose();
+      });
+    });
+  }
+
   testWidgets('RAW online check uses original bytes, not the preview', (
     tester,
   ) async {
@@ -107,6 +141,7 @@ void main() {
         'status': 'remote',
         'online_complete': false,
         'online_error': 'unavailable',
+        'online_ocsp_status': 'good',
       });
       await check;
       expect(controller.onlineStatus, contains('incomplete'));
