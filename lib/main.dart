@@ -1,7 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'dart:ui' show AppExitResponse;
+
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart';
@@ -224,9 +228,19 @@ class _ViewerAppState extends State<ViewerApp> with WindowListener {
 }
 
 class ViewerScreen extends StatefulWidget {
-  const ViewerScreen({super.key, required this.controller, this.settings});
+  const ViewerScreen({
+    super.key,
+    required this.controller,
+    this.settings,
+    this.directoryPicker,
+    this.filePicker,
+    this.isMacOS,
+  });
   final ViewerController controller;
   final SettingsStore? settings;
+  final Future<String?> Function(String? initialDirectory)? directoryPicker;
+  final Future<XFile?> Function()? filePicker;
+  final bool? isMacOS;
   @override
   State<ViewerScreen> createState() => _ViewerScreenState();
 }
@@ -238,9 +252,148 @@ String? dropRejection(List<DropItem> files) =>
 
 class _ViewerScreenState extends State<ViewerScreen> {
   final transformation = TransformationController();
-  bool picking = false;
+  int activePickers = 0;
+  bool get picking => activePickers > 0;
   bool dragging = false;
   int selection = 0;
+  double swipeDistance = 0;
+  double swipeVertical = 0;
+  double scrollHorizontal = 0;
+  double scrollVertical = 0;
+  bool panZoomEligible = false;
+  Timer? scrollTimer;
+  final Set<int> touchPointers = {};
+  bool touchGestureEligible = false;
+  Size previewSize = Size.zero;
+  bool get zoomed => (transformation.value.entry(0, 0).abs() - 1).abs() > .001;
+
+  String? pendingFolderPath;
+  int? pendingFolderSelection;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_checkFolderAccess);
+  }
+
+  Future<String?> _selectDirectory(String? initialDirectory) =>
+      widget.directoryPicker?.call(initialDirectory) ??
+      getDirectoryPath(initialDirectory: initialDirectory);
+
+  void _checkFolderAccess() {
+    final path = pendingFolderPath;
+    final request = pendingFolderSelection;
+    if (path == null ||
+        request != selection ||
+        widget.controller.currentPath != path ||
+        !widget.controller.directoryNeedsPermission) {
+      return;
+    }
+    pendingFolderPath = null;
+    pendingFolderSelection = null;
+    unawaited(_requestParentFolder(path, request!));
+  }
+
+  Future<void> _requestParentFolder(String path, int request) async {
+    final parent = File(path).parent.absolute.path;
+    setState(() => activePickers++);
+    try {
+      final selected = await _selectDirectory(parent);
+      if (!mounted ||
+          request != selection ||
+          widget.controller.currentPath != path ||
+          selected == null ||
+          Directory(selected).absolute.path != parent) {
+        return;
+      }
+      await widget.controller.authorizeDirectory(selected);
+    } catch (error) {
+      if (mounted &&
+          request == selection &&
+          widget.controller.currentPath == path) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open folder: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => activePickers--);
+    }
+  }
+
+  void _openSelected(String path, int request) {
+    if (widget.isMacOS ?? Platform.isMacOS) {
+      pendingFolderPath = path;
+      pendingFolderSelection = request;
+    }
+    transformation.value = Matrix4.identity();
+  }
+
+  void navigate(bool forward) {
+    selection++;
+    pendingFolderPath = null;
+    pendingFolderSelection = null;
+    scrollTimer?.cancel();
+    scrollHorizontal = scrollVertical = 0;
+    transformation.value = Matrix4.identity();
+    unawaited(
+      forward ? widget.controller.next() : widget.controller.previous(),
+    );
+  }
+
+  Future<void> pickFolder() async {
+    final request = ++selection;
+    setState(() => activePickers++);
+    try {
+      final currentPath = widget.controller.currentPath;
+      final path = await _selectDirectory(
+        currentPath == null ? null : File(currentPath).parent.absolute.path,
+      );
+      if (path != null && mounted && request == selection) {
+        await widget.controller.authorizeDirectory(path);
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open folder: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => activePickers--);
+    }
+  }
+
+  Future<void> actualSize() async {
+    final bytes = widget.controller.bytes;
+    if (bytes == null || previewSize.isEmpty) return;
+    final pixelRatio = MediaQuery.devicePixelRatioOf(context);
+    final codec = await ui.instantiateImageCodec(bytes);
+    try {
+      final frame = await codec.getNextFrame();
+      var width = frame.image.width.toDouble();
+      var height = frame.image.height.toDouble();
+      if (const [5, 6, 7, 8].contains(widget.controller.previewOrientation)) {
+        final originalWidth = width;
+        width = height;
+        height = originalWidth;
+      }
+      frame.image.dispose();
+      if (!mounted || widget.controller.bytes != bytes) return;
+      final fit = (previewSize.width / width).clamp(0.0, double.infinity);
+      final scale =
+          1 /
+          ((fit < previewSize.height / height
+                  ? fit
+                  : previewSize.height / height) *
+              pixelRatio);
+      transformation.value = Matrix4.diagonal3Values(scale, scale, 1)
+        ..setEntry(0, 3, previewSize.width * (1 - scale) / 2)
+        ..setEntry(1, 3, previewSize.height * (1 - scale) / 2);
+      setState(() {});
+    } finally {
+      codec.dispose();
+    }
+  }
+
   late final SettingsStore settings =
       widget.settings ??
       SettingsStore(File('/tmp/musha-viewer-test-settings.json'));
@@ -268,8 +421,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
         }
       }
       if (!mounted || request != selection) return;
-      transformation.value = Matrix4.identity();
+      _openSelected(item.path, request);
       await widget.controller.open(item.path);
+      await widget.controller.waitForDirectoryDiscovery();
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -287,7 +441,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   @override
   void dispose() {
+    widget.controller.removeListener(_checkFolderAccess);
     if (widget.settings == null) settings.dispose();
+    scrollTimer?.cancel();
     transformation.dispose();
     widget.controller.dispose();
     super.dispose();
@@ -295,7 +451,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   Future<void> pick() async {
     final request = ++selection;
-    setState(() => picking = true);
+    setState(() => activePickers++);
     try {
       const images = XTypeGroup(
         label: 'Images',
@@ -309,11 +465,15 @@ class _ViewerScreenState extends State<ViewerScreen> {
           'heic',
           'tif',
           'tiff',
+          'dng',
+          'nef',
         ],
       );
-      final file = await openFile(acceptedTypeGroups: [images]);
+      final file =
+          await (widget.filePicker?.call() ??
+              openFile(acceptedTypeGroups: [images]));
       if (file != null && mounted && request == selection) {
-        transformation.value = Matrix4.identity();
+        _openSelected(file.path, request);
         unawaited(widget.controller.open(file.path));
       }
     } catch (error) {
@@ -323,7 +483,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
         );
       }
     } finally {
-      if (mounted) setState(() => picking = false);
+      if (mounted) setState(() => activePickers--);
     }
   }
 
@@ -332,114 +492,165 @@ class _ViewerScreenState extends State<ViewerScreen> {
     listenable: widget.controller,
     builder: (context, _) {
       final c = widget.controller;
-      return Scaffold(
-        appBar: AppBar(
-          title: Text(
-            c.name ?? 'musha-viewer',
-            overflow: TextOverflow.ellipsis,
-          ),
-          actions: [
-            TextButton.icon(
-              onPressed: picking ? null : pick,
-              icon: const Icon(Icons.folder_open),
-              label: const Text('Open image'),
+      return Focus(
+        autofocus: true,
+        onKeyEvent: (node, event) {
+          if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+            return KeyEventResult.ignored;
+          }
+          final focus = FocusManager.instance.primaryFocus?.context;
+          if (focus != null &&
+              focus.findAncestorWidgetOfExactType<EditableText>() != null) {
+            return KeyEventResult.ignored;
+          }
+          if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+            navigate(false);
+            return KeyEventResult.handled;
+          }
+          if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+            navigate(true);
+            return KeyEventResult.handled;
+          }
+          return KeyEventResult.ignored;
+        },
+        child: Scaffold(
+          appBar: AppBar(
+            bottom: c.directoryStatus == null
+                ? null
+                : PreferredSize(
+                    preferredSize: const Size.fromHeight(36),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      child: Text(c.directoryStatus!),
+                    ),
+                  ),
+            title: Text(
+              c.name == null
+                  ? 'musha-viewer'
+                  : '${c.name}${c.imageCount > 0 && c.currentIndex >= 0 ? '  ${c.currentIndex + 1} / ${c.imageCount}' : ''}',
+              overflow: TextOverflow.ellipsis,
             ),
-            IconButton(
-              tooltip: 'Toggle inspector',
-              onPressed: () {
-                settings.value.inspectorVisible =
-                    !settings.value.inspectorVisible;
-                settings.changed();
-              },
-              icon: const Icon(Icons.view_sidebar),
-            ),
-            PopupMenuButton<ThemeMode>(
-              tooltip: 'Appearance',
-              onSelected: (theme) {
-                settings.value.theme = theme;
-                settings.changed();
-              },
-              itemBuilder: (_) => [
-                for (final mode in ThemeMode.values)
-                  PopupMenuItem(value: mode, child: Text(mode.name)),
-              ],
-            ),
-            const SizedBox(width: 12),
-          ],
-        ),
-        body: DropTarget(
-          onDragEntered: (_) => setState(() => dragging = true),
-          onDragExited: (_) => setState(() => dragging = false),
-          onDragDone: (details) {
-            setState(() => dragging = false);
-            unawaited(dropped(details.files));
-          },
-          child: Stack(
-            children: [
-              LayoutBuilder(
-                builder: (context, constraints) {
-                  final preview = _preview(c);
-                  final inspector = _inspector(c);
-                  if (!settings.value.inspectorVisible) return preview;
-                  return constraints.maxWidth < 650
-                      ? Column(
-                          children: [
-                            Expanded(child: preview),
-                            SizedBox(
-                              height: constraints.maxHeight * .42,
-                              child: inspector,
-                            ),
-                          ],
-                        )
-                      : Row(
-                          children: [
-                            Expanded(child: preview),
-                            MouseRegion(
-                              cursor: SystemMouseCursors.resizeColumn,
-                              child: GestureDetector(
-                                behavior: HitTestBehavior.opaque,
-                                onHorizontalDragUpdate: (details) {
-                                  setState(() {
-                                    settings.value.inspectorWidth =
-                                        (settings.value.inspectorWidth -
-                                                details.delta.dx)
-                                            .clamp(
-                                              240,
-                                              (constraints.maxWidth - 200)
-                                                  .clamp(240, 1000),
-                                            );
-                                    settings.changed();
-                                  });
-                                },
-                                child: const SizedBox(width: 8),
-                              ),
-                            ),
-                            SizedBox(
-                              width: settings.value.inspectorWidth.clamp(
-                                240,
-                                constraints.maxWidth - 200,
-                              ),
-                              child: inspector,
-                            ),
-                          ],
-                        );
-                },
+            actions: [
+              IconButton(
+                tooltip: 'Previous image',
+                onPressed: c.canPrevious ? () => navigate(false) : null,
+                icon: const Icon(Icons.chevron_left),
               ),
-              if (dragging)
-                const Positioned.fill(
-                  child: IgnorePointer(
-                    child: ColoredBox(
-                      color: Color(0x88526984),
-                      child: Center(
-                        child: Text(
-                          'Drop one image',
-                          style: TextStyle(color: Colors.white, fontSize: 28),
+              IconButton(
+                tooltip: 'Next image',
+                onPressed: c.canNext ? () => navigate(true) : null,
+                icon: const Icon(Icons.chevron_right),
+              ),
+              TextButton.icon(
+                onPressed: picking ? null : pickFolder,
+                icon: const Icon(Icons.folder),
+                label: const Text('Authorize folder'),
+              ),
+              TextButton.icon(
+                onPressed: picking ? null : pick,
+                icon: const Icon(Icons.folder_open),
+                label: const Text('Open image'),
+              ),
+              IconButton(
+                tooltip: 'Toggle inspector',
+                onPressed: () {
+                  settings.value.inspectorVisible =
+                      !settings.value.inspectorVisible;
+                  settings.changed();
+                },
+                icon: const Icon(Icons.view_sidebar),
+              ),
+              PopupMenuButton<ThemeMode>(
+                tooltip: 'Appearance',
+                onSelected: (theme) {
+                  settings.value.theme = theme;
+                  settings.changed();
+                },
+                itemBuilder: (_) => [
+                  for (final mode in ThemeMode.values)
+                    PopupMenuItem(value: mode, child: Text(mode.name)),
+                ],
+              ),
+              const SizedBox(width: 12),
+            ],
+          ),
+          body: DropTarget(
+            onDragEntered: (_) => setState(() => dragging = true),
+            onDragExited: (_) => setState(() => dragging = false),
+            onDragDone: (details) {
+              setState(() => dragging = false);
+              unawaited(dropped(details.files));
+            },
+            child: Stack(
+              children: [
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final preview = _preview(c);
+                    final inspector = _inspector(c);
+                    if (!settings.value.inspectorVisible) return preview;
+                    return constraints.maxWidth < 650
+                        ? Column(
+                            children: [
+                              Expanded(child: preview),
+                              SizedBox(
+                                height: constraints.maxHeight * .42,
+                                child: inspector,
+                              ),
+                            ],
+                          )
+                        : Row(
+                            children: [
+                              Expanded(child: preview),
+                              MouseRegion(
+                                cursor: SystemMouseCursors.resizeColumn,
+                                child: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onHorizontalDragUpdate: (details) {
+                                    setState(() {
+                                      settings.value.inspectorWidth =
+                                          (settings.value.inspectorWidth -
+                                                  details.delta.dx)
+                                              .clamp(
+                                                240,
+                                                (constraints.maxWidth - 200)
+                                                    .clamp(240, 1000),
+                                              );
+                                      settings.changed();
+                                    });
+                                  },
+                                  child: const SizedBox(width: 8),
+                                ),
+                              ),
+                              SizedBox(
+                                width: settings.value.inspectorWidth.clamp(
+                                  240,
+                                  constraints.maxWidth - 200,
+                                ),
+                                child: inspector,
+                              ),
+                            ],
+                          );
+                  },
+                ),
+                if (dragging)
+                  const Positioned.fill(
+                    child: IgnorePointer(
+                      child: ColoredBox(
+                        color: Color(0x88526984),
+                        child: Center(
+                          child: Text(
+                            'Drop one image',
+                            style: TextStyle(color: Colors.white, fontSize: 28),
+                          ),
                         ),
                       ),
                     ),
                   ),
-                ),
-            ],
+              ],
+            ),
           ),
         ),
       );
@@ -454,20 +665,107 @@ class _ViewerScreenState extends State<ViewerScreen> {
           child: c.loading
               ? const Center(child: CircularProgressIndicator())
               : c.bytes != null
-              ? InteractiveViewer(
-                  transformationController: transformation,
-                  minScale: 0.2,
-                  maxScale: 8,
-                  child: SizedBox.expand(
-                    child: Image.memory(
-                      c.bytes!,
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, error, _) => Text(
-                        'Image display failed: $error',
-                        style: const TextStyle(color: Colors.white),
+              ? LayoutBuilder(
+                  builder: (context, constraints) {
+                    previewSize = constraints.biggest;
+                    return Listener(
+                      onPointerDown: (event) {
+                        if (event.kind != PointerDeviceKind.touch) return;
+                        touchPointers.add(event.pointer);
+                        if (touchPointers.length == 1) {
+                          swipeDistance = 0;
+                          swipeVertical = 0;
+                          touchGestureEligible = !zoomed;
+                        } else {
+                          touchGestureEligible = false;
+                        }
+                      },
+                      onPointerMove: (event) {
+                        if (touchGestureEligible &&
+                            touchPointers.contains(event.pointer)) {
+                          swipeDistance += event.delta.dx;
+                          swipeVertical += event.delta.dy;
+                        }
+                      },
+                      onPointerUp: (event) {
+                        if (touchGestureEligible &&
+                            !zoomed &&
+                            swipeDistance.abs() > 80 &&
+                            swipeDistance.abs() > swipeVertical.abs()) {
+                          navigate(swipeDistance < 0);
+                        }
+                        touchPointers.remove(event.pointer);
+                        touchGestureEligible = false;
+                      },
+                      onPointerCancel: (event) {
+                        touchPointers.remove(event.pointer);
+                        touchGestureEligible = false;
+                      },
+                      onPointerPanZoomStart: (_) {
+                        swipeDistance = swipeVertical = 0;
+                        panZoomEligible = !zoomed;
+                      },
+                      onPointerPanZoomUpdate: (event) {
+                        if (zoomed || (event.scale - 1).abs() >= .01) {
+                          panZoomEligible = false;
+                          swipeDistance = swipeVertical = 0;
+                        } else if (panZoomEligible) {
+                          swipeDistance += event.panDelta.dx;
+                          swipeVertical += event.panDelta.dy;
+                        }
+                      },
+                      onPointerPanZoomEnd: (_) {
+                        if (panZoomEligible &&
+                            !zoomed &&
+                            swipeDistance.abs() > 60 &&
+                            swipeDistance.abs() > swipeVertical.abs()) {
+                          navigate(swipeDistance < 0);
+                        }
+                        swipeDistance = swipeVertical = 0;
+                        panZoomEligible = false;
+                      },
+                      onPointerSignal: (event) {
+                        if (event is! PointerScrollEvent || zoomed) return;
+                        scrollHorizontal += event.scrollDelta.dx;
+                        scrollVertical += event.scrollDelta.dy;
+                        scrollTimer?.cancel();
+                        scrollTimer = Timer(
+                          const Duration(milliseconds: 180),
+                          () {
+                            final horizontal = scrollHorizontal;
+                            final vertical = scrollVertical;
+                            scrollHorizontal = scrollVertical = 0;
+                            if (mounted &&
+                                !zoomed &&
+                                horizontal.abs() > 30 &&
+                                horizontal.abs() > vertical.abs()) {
+                              navigate(horizontal > 0);
+                            }
+                          },
+                        );
+                      },
+                      child: InteractiveViewer(
+                        transformationController: transformation,
+                        panEnabled: zoomed,
+                        minScale: 0.01,
+                        maxScale: 100,
+                        onInteractionEnd: (_) => setState(() {}),
+                        child: SizedBox.expand(
+                          child: _orientedPreview(
+                            c,
+                            Image.memory(
+                              c.bytes!,
+                              fit: BoxFit.contain,
+                              errorBuilder: (_, error, _) => Text(
+                                'Image display failed: $error',
+                                style: const TextStyle(color: Colors.white),
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
+                    );
+                  },
                 )
               : Center(
                   child: Padding(
@@ -484,15 +782,45 @@ class _ViewerScreenState extends State<ViewerScreen> {
           Positioned(
             right: 12,
             bottom: 12,
-            child: FilledButton.tonalIcon(
-              onPressed: () => transformation.value = Matrix4.identity(),
-              icon: const Icon(Icons.fit_screen),
-              label: const Text('Fit'),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FilledButton.tonalIcon(
+                  onPressed: () =>
+                      setState(() => transformation.value = Matrix4.identity()),
+                  icon: const Icon(Icons.fit_screen),
+                  label: const Text('Fit'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.tonal(
+                  onPressed: actualSize,
+                  child: const Text('100%'),
+                ),
+              ],
             ),
           ),
       ],
     ),
   );
+
+  Widget _orientedPreview(ViewerController c, Widget image) {
+    final orientation = c.previewOrientation ?? 1;
+    final turns = switch (orientation) {
+      3 || 4 => 2,
+      6 || 7 => 1,
+      5 || 8 => 3,
+      _ => 0,
+    };
+    final mirrored =
+        orientation == 2 ||
+        orientation == 4 ||
+        orientation == 5 ||
+        orientation == 7;
+    return RotatedBox(
+      quarterTurns: turns,
+      child: mirrored ? Transform.flip(flipX: true, child: image) : image,
+    );
+  }
 
   Widget _inspector(ViewerController c) {
     final entries = [...c.fileEntries, ...c.imageEntries, ...c.exifEntries];
@@ -506,57 +834,140 @@ class _ViewerScreenState extends State<ViewerScreen> {
           final header = <Widget>[
             Text('Inspector', style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 16),
-            Text(
-              'Content Credentials (C2PA)',
-              style: Theme.of(context).textTheme.titleSmall,
-            ),
-            Text(c.c2paStatus),
-            if (c.c2paResult case final result?) ...[
+            if (c.c2paVisibility) ...[
               Text(
-                'Credentials: ${switch (result['status']) {
-                  'present' => 'present',
-                  'absent' => 'not detected',
-                  'remote' => 'remote reference',
-                  _ => 'unknown',
-                }}',
+                'Content Credentials (C2PA)',
+                style: Theme.of(context).textTheme.titleSmall,
               ),
+              Text(c.c2paStatus),
+              if (c.c2paResult case final result?) ...[
+                Text(
+                  'Credentials: ${switch (result['status']) {
+                    'present' => 'present',
+                    'absent' => 'not detected',
+                    'remote' => 'remote reference',
+                    _ => 'unknown',
+                  }}',
+                ),
+                Text(
+                  'Parsing: ${switch (result['status']) {
+                    'present' => 'completed',
+                    'absent' => 'no embedded manifest found',
+                    'remote' => 'remote manifest not fetched',
+                    'unsupported' => 'unsupported format',
+                    'error' => 'failed',
+                    _ => 'unknown',
+                  }}',
+                ),
+                Text('Asset integrity: ${result['integrity'] ?? 'unknown'}'),
+                Text(
+                  'Claim integrity: ${result['claim_integrity'] ?? 'unknown'}',
+                ),
+                Text(
+                  'SDK validation: ${result['validation_state'] ?? 'unknown'}',
+                ),
+                Text('Signature: ${result['signature'] ?? 'unknown'}'),
+                Text(
+                  'Trust: ${result['trust'] ?? 'unknown'} (no general C2PA trust list configured)',
+                ),
+                const Text('Offline verification: no online lookup'),
+                if (result['error'] != null)
+                  SelectableText('Error: ${result['error']}'),
+                if (result['error_code'] != null)
+                  SelectableText('Code: ${result['error_code']}'),
+                Material(
+                  color: Colors.transparent,
+                  child: ExpansionTile(
+                    title: const Text('Verification details'),
+                    children: [
+                      SelectableText(
+                        const JsonEncoder.withIndent('  ').convert(result),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+            if (c.canVerifyOnline ||
+                c.onlineVerifying ||
+                c.onlineStatus != null ||
+                c.onlineResult != null) ...[
+              const SizedBox(height: 12),
               Text(
-                'Parsing: ${switch (result['status']) {
-                  'present' => 'completed',
-                  'absent' => 'no embedded manifest found',
-                  'remote' => 'remote manifest not fetched',
-                  'unsupported' => 'unsupported format',
-                  'error' => 'failed',
-                  _ => 'unknown',
-                }}',
+                'Online verification',
+                style: Theme.of(context).textTheme.titleSmall,
               ),
-              Text('Asset integrity: ${result['integrity'] ?? 'unknown'}'),
-              Text(
-                'Claim integrity: ${result['claim_integrity'] ?? 'unknown'}',
+              const Text(
+                'Optional: verification may send GET requests to remote '
+                'resources referenced by the credentials, including OCSP '
+                'requests that may encode certificate information. Remote '
+                'servers can see your IP address, and requested URLs may '
+                'contain identifiers. HTTPS GET is allowed; plain HTTP is allowed '
+                'only for a strict OCSP request to ocsp.leica.systems. Leica '
+                'can see your IP address and certificate identifiers. The HTTP '
+                'request is unencrypted, so network intermediaries can also '
+                'see certificate identifiers. Your source image is not uploaded.',
               ),
-              Text(
-                'SDK validation: ${result['validation_state'] ?? 'unknown'}',
-              ),
-              Text('Signature: ${result['signature'] ?? 'unknown'}'),
-              Text(
-                'Trust: ${result['trust'] ?? 'unknown'} (no trust list configured)',
-              ),
-              const Text('Online lookup: disabled'),
-              if (result['error'] != null)
-                SelectableText('Error: ${result['error']}'),
-              if (result['error_code'] != null)
-                SelectableText('Code: ${result['error_code']}'),
-              Material(
-                color: Colors.transparent,
-                child: ExpansionTile(
-                  title: const Text('Verification details'),
-                  children: [
-                    SelectableText(
-                      const JsonEncoder.withIndent('  ').convert(result),
-                    ),
-                  ],
+              Align(
+                alignment: Alignment.centerLeft,
+                child: OutlinedButton(
+                  onPressed: c.canVerifyOnline && !c.onlineVerifying
+                      ? () => unawaited(c.verifyOnline())
+                      : null,
+                  child: Text(
+                    c.onlineVerifying ? 'Verifying online…' : 'Verify online',
+                  ),
                 ),
               ),
+              if (c.onlineStatus != null) Text(c.onlineStatus!),
+              if (c.onlineResult case final online?) ...[
+                if (online['online_complete'] == false)
+                  Text(
+                    'Online verification incomplete',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                if (online['online_request_count'] is num)
+                  Text(
+                    'Online request attempts: ${online['online_request_count']}',
+                  ),
+                if (online['online_hosts'] is List)
+                  Text(
+                    'Requested hosts (may not have been contacted): '
+                    '${(online['online_hosts'] as List).whereType<String>().where((host) => RegExp(r'^[a-zA-Z0-9.:-]+$').hasMatch(host)).join(', ')}',
+                  ),
+                Text('Online credentials: ${online['status'] ?? 'unknown'}'),
+                Text(
+                  'Online asset integrity: ${online['integrity'] ?? 'unknown'}',
+                ),
+                Text(
+                  'Online claim integrity: ${online['claim_integrity'] ?? 'unknown'}',
+                ),
+                Text(
+                  'Embedded/local SDK validation: ${online['validation_state'] ?? 'unknown'}',
+                ),
+                Text('Online signature: ${online['signature'] ?? 'unknown'}'),
+                Text(
+                  'Online trust: ${online['trust'] ?? 'unknown'} (no general C2PA trust list configured)',
+                ),
+                if (online['error'] != null)
+                  SelectableText('Online error: ${online['error']}'),
+                if (online['error_code'] != null)
+                  SelectableText('Online code: ${online['error_code']}'),
+                Material(
+                  color: Colors.transparent,
+                  child: ExpansionTile(
+                    title: const Text('Online verification details'),
+                    children: [
+                      SelectableText(
+                        const JsonEncoder.withIndent('  ').convert(online),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ],
             if (settings.warning != null) Text(settings.warning!),
             const Divider(height: 32),

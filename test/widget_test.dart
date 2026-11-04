@@ -123,10 +123,12 @@ void main() {
     expect(find.text('3 × 2 pixels'), findsOneWidget);
   });
 
-  testWidgets('initial screen explains C2PA availability', (tester) async {
+  testWidgets('initial screen hides C2PA until a result is available', (
+    tester,
+  ) async {
     await tester.pumpWidget(const ViewerApp());
     expect(find.text('Open an image to begin'), findsOneWidget);
-    expect(find.text('Select an image to verify.'), findsOneWidget);
+    expect(find.text('Content Credentials (C2PA)'), findsNothing);
     expect(find.text('Open image'), findsOneWidget);
   });
 }

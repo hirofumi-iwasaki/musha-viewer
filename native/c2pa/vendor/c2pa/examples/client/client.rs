@@ -1,0 +1,150 @@
+// Copyright 2022 Adobe. All rights reserved.
+// This file is licensed to you under the Apache License,
+// Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+// or the MIT license (http://opensource.org/licenses/MIT),
+// at your option.
+
+// Unless required by applicable law or agreed to in writing,
+// this software is distributed on an "AS IS" BASIS, WITHOUT
+// WARRANTIES OR REPRESENTATIONS OF ANY KIND, either express or
+// implied. See the LICENSE-MIT and LICENSE-APACHE files for the
+// specific language governing permissions and limitations under
+// each license.
+
+//! Example C2PA client application
+
+use std::path::PathBuf;
+
+use anyhow::Result;
+use c2pa::{
+    assertions::{labels, Actions},
+    create_signer, Builder, BuilderIntent, ClaimGeneratorInfo, Reader, SigningAlg,
+};
+use serde_json::json;
+
+const GENERATOR: &str = "test_app";
+const INDENT_SPACE: usize = 2;
+
+// Example for reading the contents of a manifest store, recursively showing nested manifests
+fn show_manifest(reader: &Reader, manifest_label: &str, level: usize) -> Result<()> {
+    let indent = " ".repeat(level * INDENT_SPACE);
+
+    println!("{indent}manifest_label: {manifest_label}");
+    if let Some(manifest) = reader.get_manifest(manifest_label) {
+        println!(
+            "{}title: {} , format: {}, instance_id: {}",
+            indent,
+            manifest.title().unwrap_or("None"),
+            manifest.format().unwrap_or("None"),
+            manifest.instance_id()
+        );
+
+        for assertion in manifest.assertions().iter() {
+            println!("{}", assertion.label_with_instance());
+            match assertion.label() {
+                labels::ACTIONS => {
+                    let actions: Actions = assertion.to_assertion()?;
+                    for action in actions.actions {
+                        println!("{}{}", indent, action.action());
+                    }
+                }
+                labels::METADATA => {
+                    let metadata: serde_json::Value = assertion.to_assertion()?;
+                    println!("{indent}metadata = {metadata}");
+                }
+                _ => {}
+            }
+        }
+
+        for ingredient in manifest.ingredients().iter() {
+            println!(
+                "{}Ingredient title:{}",
+                indent,
+                ingredient.title().unwrap_or("None")
+            );
+            if let Some(validation_status) = ingredient.validation_status() {
+                for status in validation_status {
+                    println!(
+                        "Ingredient validation status: {}: {}",
+                        status.code(),
+                        status.explanation().unwrap_or_default()
+                    );
+                }
+            }
+            if let Some(label) = ingredient.active_manifest() {
+                show_manifest(reader, label, level + 1)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    // allow passing in source and dest paths or use defaults
+    let (src, dst) = match args.len() >= 3 {
+        true => (args[1].as_str(), args[2].as_str()),
+        false => (
+            "sdk/tests/fixtures/earth_apollo17.jpg",
+            "target/tmp/client.jpg",
+        ),
+    };
+
+    let source = PathBuf::from(src);
+    let dest = PathBuf::from(dst);
+
+    // overwrite the destination file if it exists
+    if dest.exists() {
+        std::fs::remove_file(&dest)?;
+    }
+
+    // create a new Manifest
+    let mut builder = Builder::default();
+    builder.definition.claim_version = Some(2);
+    let mut generator = ClaimGeneratorInfo::new(GENERATOR);
+    generator.set_version("0.1");
+    builder
+        .set_intent(BuilderIntent::Edit)
+        .set_claim_generator_info(generator)
+        .add_assertion(
+            "c2pa.metadata",
+            &json!({
+                "@context": {
+                    "exif": "http://ns.adobe.com/exif/1.0/"
+                },
+                "exif:GPSVersionID": "2.2.0.0",
+                "exif:GPSLatitude": "39,21.102N",
+                "exif:GPSLongitude": "74,26.5737W",
+                "exif:GPSAltitudeRef": 0,
+                "exif:GPSAltitude": "100963/29890",
+                "exif:GPSTimeStamp": "2019-09-22T18:22:57Z"
+            }),
+        )?;
+
+    // sign and embed into the target file
+    let signcert_path = "sdk/tests/fixtures/certs/es256.pub";
+    let pkey_path = "sdk/tests/fixtures/certs/es256.pem";
+    let signer = create_signer::from_files(signcert_path, pkey_path, SigningAlg::Es256, None)?;
+
+    builder.sign_file(&*signer, &source, &dest)?;
+
+    let reader = Reader::default().with_file(&dest)?;
+
+    // example of how to print out the whole manifest as json
+    println!("{reader}\n");
+
+    // walk through the manifests and show the contents
+    if let Some(manifest_label) = reader.active_label() {
+        show_manifest(&reader, manifest_label, 0)?;
+    }
+    if let Some(validation_status) = reader.validation_status() {
+        for status in validation_status {
+            println!(
+                "Validation status: {}: {}",
+                status.code(),
+                status.explanation().unwrap_or_default()
+            );
+        }
+    }
+    Ok(())
+}

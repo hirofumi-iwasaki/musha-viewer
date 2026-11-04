@@ -18,7 +18,7 @@ jobs:
     runs-on: xcode-27
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Check Apple Silicon and Xcode SDK
         shell: bash
         run: |
@@ -65,7 +65,7 @@ jobs:
           BUILD_COMMIT: ${{ github.sha }}
           BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: scripts/package-macos-test.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: musha-viewer-macos-27-arm64-test
           path: dist/macos-test/

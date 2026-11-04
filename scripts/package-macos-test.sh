@@ -20,7 +20,7 @@ grep -q 'Signature=adhoc' <<< "$signature"
 entitlements="$(mktemp "${TMPDIR:-/tmp}/musha-entitlements.XXXXXX")"
 trap 'rm -f "$entitlements"' EXIT
 codesign -d --entitlements :- "$app" > "$entitlements" 2>/dev/null
-for entitlement in com.apple.security.app-sandbox com.apple.security.files.user-selected.read-only com.apple.security.files.bookmarks.app-scope; do
+for entitlement in com.apple.security.app-sandbox com.apple.security.files.user-selected.read-only com.apple.security.files.bookmarks.app-scope com.apple.security.network.client; do
   [[ "$(/usr/libexec/PlistBuddy -c "Print :$entitlement" "$entitlements")" == true ]]
 done
 mkdir -p dist/macos-test

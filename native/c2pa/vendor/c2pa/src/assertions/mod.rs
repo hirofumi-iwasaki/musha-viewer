@@ -1,0 +1,106 @@
+// Copyright 2022 Adobe. All rights reserved.
+// This file is licensed to you under the Apache License,
+// Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+// or the MIT license (http://opensource.org/licenses/MIT),
+// at your option.
+
+// Unless required by applicable law or agreed to in writing,
+// this software is distributed on an "AS IS" BASIS, WITHOUT
+// WARRANTIES OR REPRESENTATIONS OF ANY KIND, either express or
+// implied. See the LICENSE-MIT and LICENSE-APACHE files for the
+// specific language governing permissions and limitations under
+// each license.
+
+//! Assertion helpers to build, validate, and parse assertions.
+
+mod actions;
+#[allow(deprecated)]
+pub use actions::c2pa_reason;
+pub(crate) use actions::V2_DEPRECATED_ACTIONS;
+pub use actions::{
+    c2pa_action, Action, ActionParameters, ActionTemplate, Actions, C2paReason, DigitalSourceType,
+    SoftwareAgent,
+};
+
+mod asset_reference;
+pub use asset_reference::AssetReference;
+
+mod asset_types;
+pub use asset_types::{AssetTypeEnum, AssetTypes};
+
+mod bmff_hash;
+pub use bmff_hash::{
+    BmffHash, BmffMerkleMap, DataMap, ExclusionsMap, MerkleMap, SubsetMap, VecByteBuf,
+};
+
+mod box_hash;
+pub use box_hash::{BoxExclusion, BoxHash, BoxHashExclusionRequest, BoxMap};
+
+pub use crate::asset_io::{AllowedExclusion, ExclusionKind, C2PA_BOXHASH};
+
+mod data_hash;
+pub use data_hash::DataHash;
+
+mod collection_hash;
+pub use collection_hash::{CollectionHash, UriHashedDataMap};
+
+mod certificate_status;
+pub(crate) use certificate_status::CertificateStatus;
+
+mod creative_work;
+#[allow(deprecated)]
+pub use creative_work::CreativeWork;
+
+mod exif;
+#[allow(deprecated)]
+pub use exif::Exif;
+
+#[allow(dead_code)] // will become public later
+mod ingredient;
+pub(crate) use ingredient::Ingredient;
+pub use ingredient::Relationship;
+
+pub mod labels;
+
+mod metadata;
+pub use metadata::Metadata;
+
+mod assertion_metadata;
+pub use assertion_metadata::{
+    c2pa_source, Actor, AssertionMetadata, AssetType, DataBox, DataSource, ReviewCode, ReviewRating,
+};
+
+mod schema_org;
+#[allow(deprecated)]
+pub use schema_org::{SchemaDotOrg, SchemaDotOrgPerson};
+
+mod thumbnail;
+pub(crate) use thumbnail::Thumbnail;
+
+mod timestamp;
+pub use timestamp::TimeStamp;
+
+mod user;
+pub(crate) use user::User;
+
+mod user_cbor;
+pub(crate) use user_cbor::UserCbor;
+
+mod uuid_assertion;
+#[allow(unused_imports)]
+pub(crate) use uuid_assertion::Uuid;
+
+mod embedded_data;
+pub use embedded_data::EmbeddedData;
+
+pub mod region_of_interest;
+
+mod soft_binding;
+pub(crate) use soft_binding::soft_binding_bytes_to_bstr;
+pub use soft_binding::{SoftBinding, SoftBindingBlock, SoftBindingMetadata, SoftBindingScope};
+
+mod cloud_data;
+pub use cloud_data::{CloudData, HashedExtUri};
+
+mod external_reference;
+pub use external_reference::{ExternalReference, ExternalReferenceLocation, UnhashedExtUri};

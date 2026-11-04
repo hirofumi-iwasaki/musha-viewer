@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:musha_viewer/c2pa.dart';
@@ -12,6 +13,74 @@ void main() {
   final library = release.existsSync()
       ? release
       : File('native/c2pa/target/debug/libmusha_c2pa.so').absolute;
+  test(
+    'DNG names use the native DNG handler',
+    () async {
+      final result = await verifyC2pa(
+        Uint8List.fromList([73, 73, 42, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        'original.DNG',
+        libraryPath: library.path,
+      );
+      expect(result['status'], 'absent');
+    },
+    skip: !(Platform.isLinux || Platform.isMacOS) || !library.existsSync()
+        ? 'Native library not built; build it first to run the integration test.'
+        : false,
+  );
+  test(
+    'NEF names use the native TIFF handler',
+    () async {
+      final result = await verifyC2pa(
+        Uint8List.fromList([73, 73, 42, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        'original.NEF',
+        libraryPath: library.path,
+      );
+      expect(result['status'], 'absent');
+      final malformed = await verifyC2pa(
+        Uint8List.fromList([0, 1, 2]),
+        'original.nef',
+        libraryPath: library.path,
+      );
+      expect(malformed['status'], 'error');
+    },
+    skip: !(Platform.isLinux || Platform.isMacOS) || !library.existsSync()
+        ? 'Native library not built; build it first to run the integration test.'
+        : false,
+  );
+  test(
+    'online FFI reports no lookup for an unsigned DNG',
+    () async {
+      final bytes = Uint8List.fromList([
+        73,
+        73,
+        42,
+        0,
+        8,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+      ]);
+      final result = await verifyC2paOnline(
+        bytes,
+        'original.dng',
+        libraryPath: library.path,
+      );
+      expect(result['status'], 'absent');
+      expect(result['online'], isTrue);
+      expect(result['online_requests_attempted'], isFalse);
+      expect(result['online_complete'], isFalse);
+      expect(result['trust'], 'unknown');
+    },
+    skip: !(Platform.isLinux || Platform.isMacOS) || !library.existsSync()
+        ? 'Native library not built; build it first to run the integration test.'
+        : false,
+  );
   test(
     'native verification distinguishes signed and tampered snapshots',
     () async {
