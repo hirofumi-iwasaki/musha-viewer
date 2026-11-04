@@ -48,6 +48,40 @@ void main() {
         : false,
   );
   test(
+    'online FFI reports no lookup for an unsigned DNG',
+    () async {
+      final bytes = Uint8List.fromList([
+        73,
+        73,
+        42,
+        0,
+        8,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+      ]);
+      final result = await verifyC2paOnline(
+        bytes,
+        'original.dng',
+        libraryPath: library.path,
+      );
+      expect(result['status'], 'absent');
+      expect(result['online'], isTrue);
+      expect(result['online_requests_attempted'], isFalse);
+      expect(result['online_complete'], isFalse);
+      expect(result['trust'], 'unknown');
+    },
+    skip: !(Platform.isLinux || Platform.isMacOS) || !library.existsSync()
+        ? 'Native library not built; build it first to run the integration test.'
+        : false,
+  );
+  test(
     'native verification distinguishes signed and tampered snapshots',
     () async {
       final bytes = await File('native/c2pa/tests/fixtures/signed.jpg')

@@ -870,7 +870,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
                 Text(
                   'Trust: ${result['trust'] ?? 'unknown'} (no trust list configured)',
                 ),
-                const Text('Online lookup: disabled'),
+                const Text('Offline verification: no online lookup'),
                 if (result['error'] != null)
                   SelectableText('Error: ${result['error']}'),
                 if (result['error_code'] != null)
@@ -882,6 +882,85 @@ class _ViewerScreenState extends State<ViewerScreen> {
                     children: [
                       SelectableText(
                         const JsonEncoder.withIndent('  ').convert(result),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+            if (c.canVerifyOnline ||
+                c.onlineVerifying ||
+                c.onlineStatus != null ||
+                c.onlineResult != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                'Online verification',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              const Text(
+                'Optional: verification may send GET requests to remote '
+                'resources referenced by the credentials, including OCSP '
+                'requests that may encode certificate information. Remote '
+                'servers can see your IP address, and requested URLs may '
+                'contain identifiers. Only HTTPS requests are allowed, so '
+                'some checks may be unavailable. Your source image is not '
+                'uploaded.',
+              ),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: OutlinedButton(
+                  onPressed: c.canVerifyOnline && !c.onlineVerifying
+                      ? () => unawaited(c.verifyOnline())
+                      : null,
+                  child: Text(
+                    c.onlineVerifying ? 'Verifying online…' : 'Verify online',
+                  ),
+                ),
+              ),
+              if (c.onlineStatus != null) Text(c.onlineStatus!),
+              if (c.onlineResult case final online?) ...[
+                if (online['online_complete'] == false)
+                  Text(
+                    'Online verification incomplete',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                if (online['online_request_count'] is num)
+                  Text(
+                    'Online request attempts: ${online['online_request_count']}',
+                  ),
+                if (online['online_hosts'] is List)
+                  Text(
+                    'Requested hosts (may not have been contacted): '
+                    '${(online['online_hosts'] as List).whereType<String>().where((host) => RegExp(r'^[a-zA-Z0-9.:-]+$').hasMatch(host)).join(', ')}',
+                  ),
+                Text('Online credentials: ${online['status'] ?? 'unknown'}'),
+                Text(
+                  'Online asset integrity: ${online['integrity'] ?? 'unknown'}',
+                ),
+                Text(
+                  'Online claim integrity: ${online['claim_integrity'] ?? 'unknown'}',
+                ),
+                Text(
+                  'Embedded/local SDK validation: ${online['validation_state'] ?? 'unknown'}',
+                ),
+                Text('Online signature: ${online['signature'] ?? 'unknown'}'),
+                Text(
+                  'Online trust: ${online['trust'] ?? 'unknown'} (no trust list configured)',
+                ),
+                if (online['error'] != null)
+                  SelectableText('Online error: ${online['error']}'),
+                if (online['error_code'] != null)
+                  SelectableText('Online code: ${online['error_code']}'),
+                Material(
+                  color: Colors.transparent,
+                  child: ExpansionTile(
+                    title: const Text('Online verification details'),
+                    children: [
+                      SelectableText(
+                        const JsonEncoder.withIndent('  ').convert(online),
                       ),
                     ],
                   ),

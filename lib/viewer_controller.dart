@@ -58,6 +58,9 @@ class ViewerService {
   Future<Map<String, dynamic>> c2pa(Uint8List bytes, String name) =>
       verifyC2pa(bytes, name);
 
+  Future<Map<String, dynamic>> c2paOnline(Uint8List bytes, String name) =>
+      verifyC2paOnline(bytes, name);
+
   Future<List<MetadataEntry>> exif(Uint8List bytes) =>
       compute(_extractExif, bytes);
 }
@@ -220,6 +223,52 @@ class ViewerController extends ChangeNotifier {
   String? fileError, previewError, exifStatus;
   bool loading = false;
   Map<String, dynamic>? c2paResult;
+  Map<String, dynamic>? onlineResult;
+  String? onlineStatus;
+  bool onlineVerifying = false;
+  Uint8List? _onlineBytes;
+  bool get canVerifyOnline => _onlineBytes != null && !onlineVerifying;
+
+  Future<void> verifyOnline() async {
+    final snapshot = _onlineBytes;
+    final currentName = name;
+    if (snapshot == null || currentName == null || onlineVerifying) return;
+    final id = _session;
+    onlineVerifying = true;
+    onlineStatus = 'Online verification in progress…';
+    onlineResult = null;
+    notifyListeners();
+    final previous = _rawWork;
+    final operation = previous.catchError((Object _) {}).then((_) async {
+      if (!_current(id)) return;
+      try {
+        final value = await service.c2paOnline(snapshot, currentName);
+        _update(id, () {
+          onlineResult = value;
+          onlineStatus =
+              value['online_complete'] != true ||
+                  value['status'] == 'error' ||
+                  value['status'] == 'remote'
+              ? 'Online check incomplete: ${value['online_error'] ?? 'Some information was unavailable.'}'
+              : 'Requested network resources retrieved; trust and revocation remain unconfirmed';
+          onlineVerifying = false;
+        });
+      } catch (error) {
+        _update(id, () {
+          onlineStatus = 'Online check unavailable: $error';
+          onlineVerifying = false;
+        });
+      }
+    });
+    _rawWork = operation;
+    await operation;
+  }
+
+  void _retainOnlineSnapshot(Uint8List data, Map<String, dynamic> result) {
+    final status = result['status'];
+    _onlineBytes = status == 'present' || status == 'remote' ? data : null;
+  }
+
   String c2paStatus = 'Select an image to verify.';
 
   bool _current(int id) => !_disposed && id == _session;
@@ -264,6 +313,10 @@ class ViewerController extends ChangeNotifier {
     exifStatus = 'Reading EXIF…';
     loading = true;
     c2paResult = null;
+    onlineResult = null;
+    onlineStatus = null;
+    onlineVerifying = false;
+    _onlineBytes = null;
     c2paStatus = 'Verifying…';
     directoryStatus = null;
     notifyListeners();
@@ -299,6 +352,7 @@ class ViewerController extends ChangeNotifier {
             (value) {
               _update(id, () {
                 c2paResult = value;
+                _retainOnlineSnapshot(data, value);
                 c2paStatus = 'Offline verification';
               });
             },
@@ -392,6 +446,7 @@ class ViewerController extends ChangeNotifier {
                       (value) {
                         _update(id, () {
                           c2paResult = value;
+                          _retainOnlineSnapshot(data, value);
                           c2paStatus = 'Offline verification of original file';
                         });
                       },
@@ -461,6 +516,7 @@ class ViewerController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _onlineBytes = null;
     _session++;
     _directorySession++;
     _previewCache.invalidate();

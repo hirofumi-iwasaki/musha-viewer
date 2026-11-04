@@ -21,8 +21,15 @@ Future<Map<String, dynamic>> verifyC2pa(
   Uint8List bytes,
   String name, {
   String? libraryPath,
-}) => compute(_verify, (bytes, name, libraryPath));
-Map<String, dynamic> _verify((Uint8List, String, String?) input) {
+}) => compute(_verify, (bytes, name, libraryPath, false));
+
+Future<Map<String, dynamic>> verifyC2paOnline(
+  Uint8List bytes,
+  String name, {
+  String? libraryPath,
+}) => compute(_verify, (bytes, name, libraryPath, true));
+
+Map<String, dynamic> _verify((Uint8List, String, String?, bool) input) {
   final library = input.$3 != null
       ? DynamicLibrary.open(input.$3!)
       : Platform.isMacOS
@@ -33,7 +40,7 @@ Map<String, dynamic> _verify((Uint8List, String, String?) input) {
           '${File(Platform.resolvedExecutable).parent.path}/lib/libmusha_c2pa.so',
         );
   final verify = library.lookupFunction<_VerifyNative, _VerifyDart>(
-    'musha_c2pa_verify',
+    input.$4 ? 'musha_c2pa_verify_online' : 'musha_c2pa_verify',
   );
   final free = library
       .lookupFunction<_FreeNative, void Function(Pointer<Utf8>)>(
