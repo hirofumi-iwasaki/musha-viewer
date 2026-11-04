@@ -46,7 +46,7 @@ jobs:
           test "$(sed -n '1p' release-check.txt)" = "$RELEASE_TAG"
           test "$(sed -n '2p' release-check.txt)" = false
           printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: refs/tags/${{ steps.release.outputs.tag }}
           persist-credentials: false
