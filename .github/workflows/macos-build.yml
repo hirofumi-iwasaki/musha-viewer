@@ -3,7 +3,7 @@ name: macOS test build
 on:
   workflow_dispatch:
   push:
-    branches: [release/0.1.0]
+    branches: [release/0.2.0]
 
 permissions:
   contents: read
@@ -61,13 +61,10 @@ jobs:
           test -f native/c2pa/target/macos/libmusha_c2pa.dylib
           flutter test
       - name: Validate and package test app
-        env:
-          BUILD_COMMIT: ${{ github.sha }}
-          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: scripts/package-macos-test.sh
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
-          name: musha-viewer-macos-27-arm64-test
-          path: dist/macos-test/
+          path: dist/musha-viewer-macos-27-arm64-test.zip
+          archive: false
           if-no-files-found: error
           retention-days: 14

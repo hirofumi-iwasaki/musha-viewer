@@ -65,9 +65,10 @@
 		331C80D7294CF71000263BE5 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
 		333000ED22D3DE5D00554162 /* Warnings.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Warnings.xcconfig; sourceTree = "<group>"; };
 		335BBD1A22A9A15E00E9071D /* GeneratedPluginRegistrant.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = GeneratedPluginRegistrant.swift; sourceTree = "<group>"; };
-		33CC10ED2044A3C60003C045 /* musha-viewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "musha-viewer.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		33CC10ED2044A3C60003C045 /* Musha Viewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Musha Viewer.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		33CC10F02044A3C60003C045 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		33CC10F22044A3C60003C045 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = Runner/Assets.xcassets; sourceTree = "<group>"; };
+		A8F572612FCE4E9A82C70A01 /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/MainMenu.strings; sourceTree = "<group>"; };
 		33CC10F52044A3C60003C045 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.xib; name = Base; path = Base.lproj/MainMenu.xib; sourceTree = "<group>"; };
 		33CC10F72044A3C60003C045 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = Info.plist; path = Runner/Info.plist; sourceTree = "<group>"; };
 		33CC11122044BFA00003C045 /* MainFlutterWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainFlutterWindow.swift; sourceTree = "<group>"; };
@@ -134,7 +135,7 @@
 		33CC10EE2044A3C60003C045 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				33CC10ED2044A3C60003C045 /* musha-viewer.app */,
+				33CC10ED2044A3C60003C045 /* Musha Viewer.app */,
 				331C80D5294CF71000263BE5 /* RunnerTests.xctest */,
 			);
 			name = Products;
@@ -225,7 +226,7 @@
 				78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */,
 			);
 			productName = Runner;
-			productReference = 33CC10ED2044A3C60003C045 /* musha-viewer.app */;
+			productReference = 33CC10ED2044A3C60003C045 /* Musha Viewer.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -265,6 +266,7 @@
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				en,
+				ja,
 				Base,
 			);
 			mainGroup = 33CC10E42044A3C60003C045;
@@ -393,6 +395,7 @@
 			isa = PBXVariantGroup;
 			children = (
 				33CC10F52044A3C60003C045 /* Base */,
+				A8F572612FCE4E9A82C70A01 /* ja */,
 			);
 			name = MainMenu.xib;
 			path = Runner;
@@ -411,7 +414,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = org.musha.mushaViewer.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/musha-viewer.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/musha-viewer";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Musha Viewer.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Musha Viewer";
 			};
 			name = Debug;
 		};
@@ -425,7 +428,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = org.musha.mushaViewer.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/musha-viewer.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/musha-viewer";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Musha Viewer.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Musha Viewer";
 			};
 			name = Release;
 		};
@@ -439,7 +442,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = org.musha.mushaViewer.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/musha-viewer.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/musha-viewer";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Musha Viewer.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Musha Viewer";
 			};
 			name = Profile;
 		};

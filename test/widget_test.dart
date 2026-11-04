@@ -131,4 +131,21 @@ void main() {
     expect(find.text('Content Credentials (C2PA)'), findsNothing);
     expect(find.text('Open image'), findsOneWidget);
   });
+  testWidgets('uses Japanese only when the primary OS language is Japanese', (
+    tester,
+  ) async {
+    tester.platformDispatcher.localesTestValue = [const Locale('ja', 'JP')];
+    addTearDown(tester.platformDispatcher.clearLocalesTestValue);
+    await tester.pumpWidget(const ViewerApp());
+    await tester.pumpAndSettle();
+    expect(find.text('画像を開く'), findsOneWidget);
+    expect(find.text('画像を開いてください'), findsOneWidget);
+    tester.platformDispatcher.localesTestValue = [
+      const Locale('fr'),
+      const Locale('ja'),
+    ];
+    await tester.pumpAndSettle();
+    expect(find.text('Open image'), findsOneWidget);
+    expect(find.text('Open an image to begin'), findsOneWidget);
+  });
 }

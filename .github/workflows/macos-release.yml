@@ -95,16 +95,10 @@ jobs:
           test -f native/c2pa/target/macos/libmusha_c2pa.dylib
           flutter test
       - name: Validate and package test app
-        env:
-          BUILD_COMMIT: ${{ steps.commit.outputs.sha }}
-          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: scripts/package-macos-test.sh
-      - name: Package release asset with notices
-        run: |
-          ditto -c -k --sequesterRsrc --keepParent dist/macos-test dist/musha-viewer-macos-27-arm64-test-artifact.zip
       - name: Attach asset to published release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
-        run: gh release upload "$RELEASE_TAG" dist/musha-viewer-macos-27-arm64-test-artifact.zip --clobber
+        run: gh release upload "$RELEASE_TAG" dist/musha-viewer-macos-27-arm64-test.zip --clobber

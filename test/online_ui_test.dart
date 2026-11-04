@@ -65,12 +65,8 @@ void main() {
     expect(find.text('Offline verification'), findsOneWidget);
     expect(
       find.textContaining('GET requests to remote resources'),
-      findsOneWidget,
+      findsNothing,
     );
-    expect(find.textContaining('source image is not uploaded'), findsOneWidget);
-    expect(find.textContaining('ocsp.leica.systems'), findsOneWidget);
-    expect(find.textContaining('certificate identifiers'), findsOneWidget);
-    expect(find.textContaining('network intermediaries'), findsOneWidget);
     await tester.ensureVisible(find.text('Verify online'));
     await tester.tap(find.text('Verify online'));
     await tester.pump();

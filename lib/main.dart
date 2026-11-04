@@ -10,6 +10,9 @@ import 'package:flutter/services.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+
+import 'localization.dart';
 
 import 'package:screen_retriever/screen_retriever.dart';
 import 'package:window_manager/window_manager.dart';
@@ -209,7 +212,15 @@ class _ViewerAppState extends State<ViewerApp> with WindowListener {
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: settings,
     builder: (context, _) => MaterialApp(
-      title: 'musha-viewer',
+      title: 'Musha Viewer',
+      supportedLocales: const [Locale('en'), Locale('ja')],
+      localeListResolutionCallback: (locales, _) =>
+          locales != null &&
+              locales.isNotEmpty &&
+              locales.first.languageCode == 'ja'
+          ? const Locale('ja')
+          : const Locale('en'),
+      localizationsDelegates: GlobalMaterialLocalizations.delegates,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff526984)),
         useMaterial3: true,
@@ -312,7 +323,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
           request == selection &&
           widget.controller.currentPath == path) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not open folder: $error')),
+          SnackBar(content: Text(tr(context, 'Could not open folder: $error'))),
         );
       }
     } finally {
@@ -354,7 +365,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not open folder: $error')),
+          SnackBar(content: Text(tr(context, 'Could not open folder: $error'))),
         );
       }
     } finally {
@@ -403,7 +414,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
     if (rejection != null) {
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(rejection)));
+            .showSnackBar(SnackBar(content: Text(tr(context, rejection))));
       }
       return;
     }
@@ -427,7 +438,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not open dropped file: $error')),
+          SnackBar(
+            content: Text(tr(context, 'Could not open dropped file: $error')),
+          ),
         );
       }
     } finally {
@@ -453,8 +466,8 @@ class _ViewerScreenState extends State<ViewerScreen> {
     final request = ++selection;
     setState(() => activePickers++);
     try {
-      const images = XTypeGroup(
-        label: 'Images',
+      final images = XTypeGroup(
+        label: tr(context, 'Images'),
         extensions: [
           'jpg',
           'jpeg',
@@ -479,7 +492,9 @@ class _ViewerScreenState extends State<ViewerScreen> {
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not open file picker: $error')),
+          SnackBar(
+            content: Text(tr(context, 'Could not open file picker: $error')),
+          ),
         );
       }
     } finally {
@@ -524,38 +539,38 @@ class _ViewerScreenState extends State<ViewerScreen> {
                         horizontal: 16,
                         vertical: 8,
                       ),
-                      child: Text(c.directoryStatus!),
+                      child: Text(tr(context, c.directoryStatus!)),
                     ),
                   ),
             title: Text(
               c.name == null
-                  ? 'musha-viewer'
+                  ? 'Musha Viewer'
                   : '${c.name}${c.imageCount > 0 && c.currentIndex >= 0 ? '  ${c.currentIndex + 1} / ${c.imageCount}' : ''}',
               overflow: TextOverflow.ellipsis,
             ),
             actions: [
               IconButton(
-                tooltip: 'Previous image',
+                tooltip: tr(context, 'Previous image'),
                 onPressed: c.canPrevious ? () => navigate(false) : null,
                 icon: const Icon(Icons.chevron_left),
               ),
               IconButton(
-                tooltip: 'Next image',
+                tooltip: tr(context, 'Next image'),
                 onPressed: c.canNext ? () => navigate(true) : null,
                 icon: const Icon(Icons.chevron_right),
               ),
               TextButton.icon(
                 onPressed: picking ? null : pickFolder,
                 icon: const Icon(Icons.folder),
-                label: const Text('Authorize folder'),
+                label: Text(tr(context, 'Authorize folder')),
               ),
               TextButton.icon(
                 onPressed: picking ? null : pick,
                 icon: const Icon(Icons.folder_open),
-                label: const Text('Open image'),
+                label: Text(tr(context, 'Open image')),
               ),
               IconButton(
-                tooltip: 'Toggle inspector',
+                tooltip: tr(context, 'Toggle inspector'),
                 onPressed: () {
                   settings.value.inspectorVisible =
                       !settings.value.inspectorVisible;
@@ -564,14 +579,17 @@ class _ViewerScreenState extends State<ViewerScreen> {
                 icon: const Icon(Icons.view_sidebar),
               ),
               PopupMenuButton<ThemeMode>(
-                tooltip: 'Appearance',
+                tooltip: tr(context, 'Appearance'),
                 onSelected: (theme) {
                   settings.value.theme = theme;
                   settings.changed();
                 },
                 itemBuilder: (_) => [
                   for (final mode in ThemeMode.values)
-                    PopupMenuItem(value: mode, child: Text(mode.name)),
+                    PopupMenuItem(
+                      value: mode,
+                      child: Text(tr(context, mode.name)),
+                    ),
                 ],
               ),
               const SizedBox(width: 12),
@@ -636,14 +654,17 @@ class _ViewerScreenState extends State<ViewerScreen> {
                   },
                 ),
                 if (dragging)
-                  const Positioned.fill(
+                  Positioned.fill(
                     child: IgnorePointer(
                       child: ColoredBox(
                         color: Color(0x88526984),
                         child: Center(
                           child: Text(
-                            'Drop one image',
-                            style: TextStyle(color: Colors.white, fontSize: 28),
+                            tr(context, 'Drop one image'),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 28,
+                            ),
                           ),
                         ),
                       ),
@@ -757,7 +778,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
                               c.bytes!,
                               fit: BoxFit.contain,
                               errorBuilder: (_, error, _) => Text(
-                                'Image display failed: $error',
+                                tr(context, 'Image display failed: $error'),
                                 style: const TextStyle(color: Colors.white),
                               ),
                             ),
@@ -771,7 +792,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
                   child: Padding(
                     padding: const EdgeInsets.all(24),
                     child: Text(
-                      c.previewError ?? 'Open an image to begin',
+                      tr(context, c.previewError ?? 'Open an image to begin'),
                       textAlign: TextAlign.center,
                       style: const TextStyle(color: Colors.white70),
                     ),
@@ -789,7 +810,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
                   onPressed: () =>
                       setState(() => transformation.value = Matrix4.identity()),
                   icon: const Icon(Icons.fit_screen),
-                  label: const Text('Fit'),
+                  label: Text(tr(context, 'Fit')),
                 ),
                 const SizedBox(width: 8),
                 FilledButton.tonal(
@@ -832,53 +853,78 @@ class _ViewerScreenState extends State<ViewerScreen> {
       child: Builder(
         builder: (context) {
           final header = <Widget>[
-            Text('Inspector', style: Theme.of(context).textTheme.titleLarge),
+            Text(
+              tr(context, 'Inspector'),
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
             const SizedBox(height: 16),
             if (c.c2paVisibility) ...[
               Text(
-                'Content Credentials (C2PA)',
+                tr(context, 'Content Credentials (C2PA)'),
                 style: Theme.of(context).textTheme.titleSmall,
               ),
-              Text(c.c2paStatus),
+              Text(tr(context, c.c2paStatus)),
               if (c.c2paResult case final result?) ...[
                 Text(
-                  'Credentials: ${switch (result['status']) {
-                    'present' => 'present',
-                    'absent' => 'not detected',
-                    'remote' => 'remote reference',
-                    _ => 'unknown',
-                  }}',
+                  tr(
+                    context,
+                    'Credentials: ${switch (result['status']) {
+                      'present' => 'present',
+                      'absent' => 'not detected',
+                      'remote' => 'remote reference',
+                      _ => 'unknown',
+                    }}',
+                  ),
                 ),
                 Text(
-                  'Parsing: ${switch (result['status']) {
-                    'present' => 'completed',
-                    'absent' => 'no embedded manifest found',
-                    'remote' => 'remote manifest not fetched',
-                    'unsupported' => 'unsupported format',
-                    'error' => 'failed',
-                    _ => 'unknown',
-                  }}',
+                  tr(
+                    context,
+                    'Parsing: ${switch (result['status']) {
+                      'present' => 'completed',
+                      'absent' => 'no embedded manifest found',
+                      'remote' => 'remote manifest not fetched',
+                      'unsupported' => 'unsupported format',
+                      'error' => 'failed',
+                      _ => 'unknown',
+                    }}',
+                  ),
                 ),
-                Text('Asset integrity: ${result['integrity'] ?? 'unknown'}'),
                 Text(
-                  'Claim integrity: ${result['claim_integrity'] ?? 'unknown'}',
+                  tr(
+                    context,
+                    'Asset integrity: ${result['integrity'] ?? 'unknown'}',
+                  ),
                 ),
                 Text(
-                  'SDK validation: ${result['validation_state'] ?? 'unknown'}',
+                  tr(
+                    context,
+                    'Claim integrity: ${result['claim_integrity'] ?? 'unknown'}',
+                  ),
                 ),
-                Text('Signature: ${result['signature'] ?? 'unknown'}'),
                 Text(
-                  'Trust: ${result['trust'] ?? 'unknown'} (no general C2PA trust list configured)',
+                  tr(
+                    context,
+                    'SDK validation: ${result['validation_state'] ?? 'unknown'}',
+                  ),
                 ),
-                const Text('Offline verification: no online lookup'),
+                Text(
+                  tr(context, 'Signature: ${result['signature'] ?? 'unknown'}'),
+                ),
+                Text(
+                  tr(
+                    context,
+                    'Trust: ${result['trust'] ?? 'unknown'} (no general C2PA trust list configured)',
+                  ),
+                ),
+                Text(tr(context, 'Offline verification: no online lookup')),
                 if (result['error'] != null)
-                  SelectableText('Error: ${result['error']}'),
+                  SelectableText(tr(context, 'Error: ${result['error']}')),
                 if (result['error_code'] != null)
-                  SelectableText('Code: ${result['error_code']}'),
+                  SelectableText(tr(context, 'Code: ${result['error_code']}')),
                 Material(
                   color: Colors.transparent,
                   child: ExpansionTile(
-                    title: const Text('Verification details'),
+                    title: Text(tr(context, 'Verification details')),
                     children: [
                       SelectableText(
                         const JsonEncoder.withIndent('  ').convert(result),
@@ -894,19 +940,8 @@ class _ViewerScreenState extends State<ViewerScreen> {
                 c.onlineResult != null) ...[
               const SizedBox(height: 12),
               Text(
-                'Online verification',
+                tr(context, 'Online verification'),
                 style: Theme.of(context).textTheme.titleSmall,
-              ),
-              const Text(
-                'Optional: verification may send GET requests to remote '
-                'resources referenced by the credentials, including OCSP '
-                'requests that may encode certificate information. Remote '
-                'servers can see your IP address, and requested URLs may '
-                'contain identifiers. HTTPS GET is allowed; plain HTTP is allowed '
-                'only for a strict OCSP request to ocsp.leica.systems. Leica '
-                'can see your IP address and certificate identifiers. The HTTP '
-                'request is unencrypted, so network intermediaries can also '
-                'see certificate identifiers. Your source image is not uploaded.',
               ),
               Align(
                 alignment: Alignment.centerLeft,
@@ -915,15 +950,18 @@ class _ViewerScreenState extends State<ViewerScreen> {
                       ? () => unawaited(c.verifyOnline())
                       : null,
                   child: Text(
-                    c.onlineVerifying ? 'Verifying online…' : 'Verify online',
+                    tr(
+                      context,
+                      c.onlineVerifying ? 'Verifying online…' : 'Verify online',
+                    ),
                   ),
                 ),
               ),
-              if (c.onlineStatus != null) Text(c.onlineStatus!),
+              if (c.onlineStatus != null) Text(tr(context, c.onlineStatus!)),
               if (c.onlineResult case final online?) ...[
                 if (online['online_complete'] == false)
                   Text(
-                    'Online verification incomplete',
+                    tr(context, 'Online verification incomplete'),
                     style: TextStyle(
                       color: Theme.of(context).colorScheme.error,
                       fontWeight: FontWeight.bold,
@@ -931,35 +969,67 @@ class _ViewerScreenState extends State<ViewerScreen> {
                   ),
                 if (online['online_request_count'] is num)
                   Text(
-                    'Online request attempts: ${online['online_request_count']}',
+                    tr(
+                      context,
+                      'Online request attempts: ${online['online_request_count']}',
+                    ),
                   ),
                 if (online['online_hosts'] is List)
                   Text(
-                    'Requested hosts (may not have been contacted): '
-                    '${(online['online_hosts'] as List).whereType<String>().where((host) => RegExp(r'^[a-zA-Z0-9.:-]+$').hasMatch(host)).join(', ')}',
+                    tr(
+                      context,
+                      'Requested hosts (may not have been contacted): '
+                      '${(online['online_hosts'] as List).whereType<String>().where((host) => RegExp(r'^[a-zA-Z0-9.:-]+$').hasMatch(host)).join(', ')}',
+                    ),
                   ),
-                Text('Online credentials: ${online['status'] ?? 'unknown'}'),
                 Text(
-                  'Online asset integrity: ${online['integrity'] ?? 'unknown'}',
+                  tr(
+                    context,
+                    'Online credentials: ${online['status'] ?? 'unknown'}',
+                  ),
                 ),
                 Text(
-                  'Online claim integrity: ${online['claim_integrity'] ?? 'unknown'}',
+                  tr(
+                    context,
+                    'Online asset integrity: ${online['integrity'] ?? 'unknown'}',
+                  ),
                 ),
                 Text(
-                  'Embedded/local SDK validation: ${online['validation_state'] ?? 'unknown'}',
+                  tr(
+                    context,
+                    'Online claim integrity: ${online['claim_integrity'] ?? 'unknown'}',
+                  ),
                 ),
-                Text('Online signature: ${online['signature'] ?? 'unknown'}'),
                 Text(
-                  'Online trust: ${online['trust'] ?? 'unknown'} (no general C2PA trust list configured)',
+                  tr(
+                    context,
+                    'Embedded/local SDK validation: ${online['validation_state'] ?? 'unknown'}',
+                  ),
+                ),
+                Text(
+                  tr(
+                    context,
+                    'Online signature: ${online['signature'] ?? 'unknown'}',
+                  ),
+                ),
+                Text(
+                  tr(
+                    context,
+                    'Online trust: ${online['trust'] ?? 'unknown'} (no general C2PA trust list configured)',
+                  ),
                 ),
                 if (online['error'] != null)
-                  SelectableText('Online error: ${online['error']}'),
+                  SelectableText(
+                    tr(context, 'Online error: ${online['error']}'),
+                  ),
                 if (online['error_code'] != null)
-                  SelectableText('Online code: ${online['error_code']}'),
+                  SelectableText(
+                    tr(context, 'Online code: ${online['error_code']}'),
+                  ),
                 Material(
                   color: Colors.transparent,
                   child: ExpansionTile(
-                    title: const Text('Online verification details'),
+                    title: Text(tr(context, 'Online verification details')),
                     children: [
                       SelectableText(
                         const JsonEncoder.withIndent('  ').convert(online),
@@ -969,23 +1039,26 @@ class _ViewerScreenState extends State<ViewerScreen> {
                 ),
               ],
             ],
-            if (settings.warning != null) Text(settings.warning!),
+            if (settings.warning != null) Text(tr(context, settings.warning!)),
             const Divider(height: 32),
-            Text('Metadata', style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              tr(context, 'Metadata'),
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             if (c.name == null)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 12),
-                child: Text('No image selected.'),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text(tr(context, 'No image selected.')),
               ),
             if (c.fileError != null)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
-                child: Text(c.fileError!),
+                child: Text(tr(context, c.fileError!)),
               ),
             if (c.exifStatus != null)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
-                child: Text(c.exifStatus!),
+                child: Text(tr(context, c.exifStatus!)),
               ),
           ];
           return ListView.builder(
@@ -1001,12 +1074,19 @@ class _ViewerScreenState extends State<ViewerScreen> {
                   children: [
                     Expanded(
                       child: SelectableText(
-                        '${entry.group} · ${entry.key}',
+                        '${tr(context, entry.group)} · ${entry.group == 'EXIF' ? entry.key : tr(context, entry.key)}',
                         style: const TextStyle(fontWeight: FontWeight.w600),
                       ),
                     ),
                     const SizedBox(width: 12),
-                    Expanded(child: SelectableText(entry.value)),
+                    Expanded(
+                      child: SelectableText(
+                        entry.group == 'Image' ||
+                                (entry.group == 'File' && entry.key == 'Size')
+                            ? tr(context, entry.value)
+                            : entry.value,
+                      ),
+                    ),
                   ],
                 ),
               );
