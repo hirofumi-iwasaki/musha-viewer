@@ -36,33 +36,32 @@ class FolderController extends ViewerController {
 }
 
 void main() {
-  testWidgets(
-    'requests the parent on denial and cancellation does not authorize',
-    (tester) async {
-      final controller = FolderController();
-      final prompts = <String?>[];
-      await tester.pumpWidget(
-        MaterialApp(
-          home: ViewerScreen(
-            controller: controller,
-            isMacOS: true,
-            filePicker: () async => XFile('/photos/one.jpg'),
-            directoryPicker: (initial) async {
-              prompts.add(initial);
-              return null;
-            },
-          ),
+  testWidgets('denied discovery does not open a folder picker', (tester) async {
+    final controller = FolderController();
+    final prompts = <String?>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ViewerScreen(
+          controller: controller,
+          filePicker: () async => XFile('/photos/one.jpg'),
+          directoryPicker: (initial) async {
+            prompts.add(initial);
+            return initial;
+          },
         ),
-      );
-      await tester.tap(find.text('Open image'));
-      await tester.pump();
-      expect(prompts, isEmpty);
-      controller.deny();
-      await tester.pump();
-      expect(prompts, ['/photos']);
-      expect(controller.authorized, isEmpty);
-    },
-  );
+      ),
+    );
+    await tester.tap(find.text('Open image'));
+    await tester.pump();
+    controller.deny();
+    await tester.pump();
+    expect(prompts, isEmpty);
+    expect(controller.authorized, isEmpty);
+    await tester.tap(find.text('Authorize folder'));
+    await tester.pump();
+    expect(prompts, ['/photos']);
+    expect(controller.authorized, ['/photos']);
+  });
 
   testWidgets('manual folder picker starts at the current image parent', (
     tester,
@@ -85,32 +84,6 @@ void main() {
     expect(initialDirectory, '/photos');
   });
 
-  testWidgets('authorizes the selected parent after access is denied', (
-    tester,
-  ) async {
-    final controller = FolderController();
-    final prompts = <String?>[];
-    await tester.pumpWidget(
-      MaterialApp(
-        home: ViewerScreen(
-          controller: controller,
-          isMacOS: true,
-          filePicker: () async => XFile('/photos/one.jpg'),
-          directoryPicker: (initial) async {
-            prompts.add(initial);
-            return '/photos';
-          },
-        ),
-      ),
-    );
-    await tester.tap(find.text('Open image'));
-    await tester.pump();
-    controller.deny();
-    await tester.pump();
-    expect(prompts, ['/photos']);
-    expect(controller.authorized, ['/photos']);
-  });
-
   testWidgets('does not prompt when directory access succeeds or is reused', (
     tester,
   ) async {
@@ -121,7 +94,6 @@ void main() {
       MaterialApp(
         home: ViewerScreen(
           controller: controller,
-          isMacOS: true,
           filePicker: () async =>
               XFile(files++ == 0 ? '/photos/one.jpg' : '/photos/two.jpg'),
           directoryPicker: (initial) async {
@@ -153,7 +125,6 @@ void main() {
       MaterialApp(
         home: ViewerScreen(
           controller: controller,
-          isMacOS: true,
           filePicker: () async =>
               XFile(files++ == 0 ? '/photos/one.jpg' : '/other/two.jpg'),
           directoryPicker: (_) => picker.future,
@@ -162,7 +133,7 @@ void main() {
     );
     await tester.tap(find.text('Open image'));
     await tester.pump();
-    controller.deny();
+    await tester.tap(find.text('Authorize folder'));
     await tester.pump();
     final openButton = tester.widget<TextButton>(
       find.widgetWithText(TextButton, 'Open image'),

@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 
 import 'package:exif/exif.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import 'c2pa.dart';
 import 'directory_navigation.dart';
@@ -55,6 +56,21 @@ class ViewerService {
 
   Future<RawPreview> rawPreview(String path) => extractRawPreview(path);
 
+  /// Decode the first flattened image using macOS ImageIO, where available.
+  /// Original bytes remain the input to metadata and verification.
+  Future<Uint8List?> platformPreview(Uint8List bytes, String path) async {
+    if (!Platform.isMacOS ||
+        !RegExp(r'\.(tiff?|psd|eps)$', caseSensitive: false).hasMatch(path)) {
+      return null;
+    }
+    final input = RegExp(r'\.eps$', caseSensitive: false).hasMatch(path)
+        ? extractEpsTiffPreview(bytes)
+        : bytes;
+    return await const MethodChannel('musha_viewer/image_preview')
+            .invokeMethod<Uint8List>('decode', input) ??
+        (throw const FormatException('No platform preview returned'));
+  }
+
   Future<Map<String, dynamic>> c2pa(Uint8List bytes, String name) =>
       verifyC2pa(bytes, name);
 
@@ -63,6 +79,38 @@ class ViewerService {
 
   Future<List<MetadataEntry>> exif(Uint8List bytes) =>
       compute(_extractExif, bytes);
+}
+
+/// Returns the embedded TIFF from a binary DOS EPS. PostScript is never run.
+Uint8List extractEpsTiffPreview(Uint8List bytes) {
+  if (bytes.length < 30 ||
+      bytes[0] != 0xc5 ||
+      bytes[1] != 0xd0 ||
+      bytes[2] != 0xd3 ||
+      bytes[3] != 0xc6) {
+    throw const FormatException('EPS has no embedded TIFF preview');
+  }
+  final header = ByteData.sublistView(bytes);
+  final offset = header.getUint32(20, Endian.little);
+  final length = header.getUint32(24, Endian.little);
+  if (offset < 30 ||
+      length < 8 ||
+      offset > bytes.length ||
+      length > bytes.length - offset) {
+    throw const FormatException('EPS has no valid embedded TIFF preview');
+  }
+  final tiff = Uint8List.sublistView(bytes, offset, offset + length);
+  final little = tiff[0] == 0x49 && tiff[1] == 0x49;
+  final big = tiff[0] == 0x4d && tiff[1] == 0x4d;
+  if (!little && !big) {
+    throw const FormatException('EPS has no valid embedded TIFF preview');
+  }
+  final magic = ByteData.sublistView(tiff)
+      .getUint16(2, little ? Endian.little : Endian.big);
+  if (magic != 42 && magic != 43) {
+    throw const FormatException('EPS has no valid embedded TIFF preview');
+  }
+  return tiff;
 }
 
 Future<List<MetadataEntry>> _extractExif(Uint8List bytes) async {
@@ -383,10 +431,27 @@ class ViewerController extends ChangeNotifier {
             },
           );
       try {
-        final dimensions = await _validatePreview(data);
+        var preview = data;
+        var converted = false;
+        late ({int width, int height}) dimensions;
+        try {
+          dimensions = await _validatePreview(preview);
+        } catch (error, stack) {
+          final platformPreview = await service.platformPreview(data, path);
+          if (platformPreview == null) Error.throwWithStackTrace(error, stack);
+          preview = platformPreview;
+          dimensions = await _validatePreview(preview);
+          converted = true;
+        }
         _update(id, () {
-          bytes = data;
+          bytes = preview;
           imageEntries = [
+            if (converted)
+              const MetadataEntry(
+                'Image',
+                'Preview',
+                'Platform preview (may be downsampled)',
+              ),
             MetadataEntry(
               'Image',
               'Decoded dimensions',

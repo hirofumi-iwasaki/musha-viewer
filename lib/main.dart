@@ -12,6 +12,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
+import 'directory_navigation.dart';
 import 'localization.dart';
 
 import 'package:screen_retriever/screen_retriever.dart';
@@ -245,13 +246,11 @@ class ViewerScreen extends StatefulWidget {
     this.settings,
     this.directoryPicker,
     this.filePicker,
-    this.isMacOS,
   });
   final ViewerController controller;
   final SettingsStore? settings;
   final Future<String?> Function(String? initialDirectory)? directoryPicker;
   final Future<XFile?> Function()? filePicker;
-  final bool? isMacOS;
   @override
   State<ViewerScreen> createState() => _ViewerScreenState();
 }
@@ -278,71 +277,12 @@ class _ViewerScreenState extends State<ViewerScreen> {
   Size previewSize = Size.zero;
   bool get zoomed => (transformation.value.entry(0, 0).abs() - 1).abs() > .001;
 
-  String? pendingFolderPath;
-  int? pendingFolderSelection;
-
-  @override
-  void initState() {
-    super.initState();
-    widget.controller.addListener(_checkFolderAccess);
-  }
-
   Future<String?> _selectDirectory(String? initialDirectory) =>
       widget.directoryPicker?.call(initialDirectory) ??
       getDirectoryPath(initialDirectory: initialDirectory);
 
-  void _checkFolderAccess() {
-    final path = pendingFolderPath;
-    final request = pendingFolderSelection;
-    if (path == null ||
-        request != selection ||
-        widget.controller.currentPath != path ||
-        !widget.controller.directoryNeedsPermission) {
-      return;
-    }
-    pendingFolderPath = null;
-    pendingFolderSelection = null;
-    unawaited(_requestParentFolder(path, request!));
-  }
-
-  Future<void> _requestParentFolder(String path, int request) async {
-    final parent = File(path).parent.absolute.path;
-    setState(() => activePickers++);
-    try {
-      final selected = await _selectDirectory(parent);
-      if (!mounted ||
-          request != selection ||
-          widget.controller.currentPath != path ||
-          selected == null ||
-          Directory(selected).absolute.path != parent) {
-        return;
-      }
-      await widget.controller.authorizeDirectory(selected);
-    } catch (error) {
-      if (mounted &&
-          request == selection &&
-          widget.controller.currentPath == path) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(tr(context, 'Could not open folder: $error'))),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => activePickers--);
-    }
-  }
-
-  void _openSelected(String path, int request) {
-    if (widget.isMacOS ?? Platform.isMacOS) {
-      pendingFolderPath = path;
-      pendingFolderSelection = request;
-    }
-    transformation.value = Matrix4.identity();
-  }
-
   void navigate(bool forward) {
     selection++;
-    pendingFolderPath = null;
-    pendingFolderSelection = null;
     scrollTimer?.cancel();
     scrollHorizontal = scrollVertical = 0;
     transformation.value = Matrix4.identity();
@@ -359,7 +299,10 @@ class _ViewerScreenState extends State<ViewerScreen> {
       final path = await _selectDirectory(
         currentPath == null ? null : File(currentPath).parent.absolute.path,
       );
-      if (path != null && mounted && request == selection) {
+      if (path != null &&
+          mounted &&
+          request == selection &&
+          widget.controller.currentPath == currentPath) {
         await widget.controller.authorizeDirectory(path);
       }
     } catch (error) {
@@ -432,7 +375,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
         }
       }
       if (!mounted || request != selection) return;
-      _openSelected(item.path, request);
+      transformation.value = Matrix4.identity();
       await widget.controller.open(item.path);
       await widget.controller.waitForDirectoryDiscovery();
     } catch (error) {
@@ -454,7 +397,6 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   @override
   void dispose() {
-    widget.controller.removeListener(_checkFolderAccess);
     if (widget.settings == null) settings.dispose();
     scrollTimer?.cancel();
     transformation.dispose();
@@ -468,25 +410,13 @@ class _ViewerScreenState extends State<ViewerScreen> {
     try {
       final images = XTypeGroup(
         label: tr(context, 'Images'),
-        extensions: [
-          'jpg',
-          'jpeg',
-          'png',
-          'gif',
-          'webp',
-          'bmp',
-          'heic',
-          'tif',
-          'tiff',
-          'dng',
-          'nef',
-        ],
+        extensions: supportedImageExtensions.toList(),
       );
       final file =
           await (widget.filePicker?.call() ??
               openFile(acceptedTypeGroups: [images]));
       if (file != null && mounted && request == selection) {
-        _openSelected(file.path, request);
+        transformation.value = Matrix4.identity();
         unawaited(widget.controller.open(file.path));
       }
     } catch (error) {
@@ -853,11 +783,6 @@ class _ViewerScreenState extends State<ViewerScreen> {
       child: Builder(
         builder: (context) {
           final header = <Widget>[
-            Text(
-              tr(context, 'Inspector'),
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
-            const SizedBox(height: 16),
             if (c.c2paVisibility) ...[
               Text(
                 tr(context, 'Content Credentials (C2PA)'),

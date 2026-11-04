@@ -14,6 +14,18 @@ A locally patched, vendored c2pa-rs 0.91.10 validates the live response signatur
 
 The EXIF parser returns a map, so duplicate keys can be lost; XMP, IPTC, ICC, MakerNotes, and unknown tags are not comprehensively covered. An empty EXIF result does not prove that a file contains no metadata. Image decoding depends on Flutter and the OS. Ordinary files over 64 MiB are rejected. Large previews can require substantial memory when decoded. RAW previews are extracted separately; original-file metadata and verification require a RAW snapshot of at most 256 MiB and may use substantially more memory due to copying. The source file is opened read-only. Settings are stored as versioned JSON in macOS Application Support, Linux `$XDG_CONFIG_HOME/musha-viewer` (or `~/.config/musha-viewer`), and Windows LocalAppData. Corrupt or unknown-version settings are preserved instead of overwritten.
 
+Image preview format support:
+
+| Format | Preview behavior |
+| --- | --- |
+| JPEG, PNG, GIF, WebP, BMP | Flutter decoder; animated GIF and WebP can play when supported by Flutter. |
+| HEIC, HEIF | Platform-dependent decoder; availability is not guaranteed. |
+| TIFF, PSD | On macOS, ImageIO fallback converts the first flattened image to PNG when Flutter cannot decode it. ImageIO compatibility varies by file; layers are not displayed. The fallback downsamples to a target of 40 million pixels and limits input and output to 64 MiB each. Other platforms may lack a decoder. |
+| DNG, NEF | Embedded JPEG preview only, subject to the RAW limits below. |
+| EPS | On macOS, binary DOS EPS with an embedded TIFF can show that TIFF preview through ImageIO. Other EPS files have no supported preview; no PostScript is executed. |
+
+File selection and navigation recognize PSD and EPS, but recognition does not guarantee that an individual file can be decoded. Metadata and verification use the original file bytes, not the converted preview.
+
 RAW previews are not full RAW development. BigTIFF and non-JPEG embedded previews are unsupported; camera-specific compatibility remains limited to the reported files; one Leica M11-D DNG passed online C2PA verification on a physical Mac. RAW TIFF orientation is applied unless the embedded JPEG has EXIF orientation; an extracted TIFF ICC profile is reported but not applied separately. Finder color and orientation comparisons and other physical Mac checks remain outstanding. See [0.2.0 implementation notes](docs/IMPLEMENTATION_0_2_0.md) for scope and limitations.
 
 ### Build and validation
@@ -47,6 +59,18 @@ C2PA は c2pa-rs で検証します。存在・解析、アセットとクレー
 ローカルで修正し同梱した c2pa-rs 0.91.10 は、ライブ応答の署名、CertID、EKU を検証し、応答者が実際の署名者証明書の発行者に直接認可され、同梱の Leica 公式 C2PA ルートへ連鎖し、応答が現在有効な期間内であることを要求します。確定した Leica のライブ失効結果には、情報マーカー `org.musha.liveOcsp.good` または `org.musha.liveOcsp.revoked` が出力されます。オンライン確認の完了には、リーフ証明書の確定したライブ OCSP 結果と、必要なすべての非ルート発行者の確認結果が Good であることが必要です。AIA がない場合、発行者の応答が失敗または不明な場合、チェーンが途中で切れている場合は、リーフが Good でも確認は不完全です。マーカーがない場合、Leica のライブ失効状態は確認できません。要求の成功は試行したリソースに限られます。一般の C2PA 信頼リストは設定されず、`verify_trust=false` で、同梱 Leica ルートは Leica OCSP 応答者チェーンの認可にのみ使います。ライブ確認が成功しても全体の信頼状態は不明です。
 
 EXIF解析器はマップを返すため同一キーが失われる場合があり、XMP、IPTC、ICC、MakerNote、未知タグを網羅しません。EXIFが空でも他のメタデータが存在しないとは限りません。画像の形式対応はFlutterとOSに依存します。通常の64 MiBを超える入力は拒否します。大きなプレビューのデコードには多くのメモリーが必要になる場合があります。RAWプレビューは別途抽出します。元ファイルのメタデータと検証には256 MiB以下のRAWスナップショットが必要で、データのコピーにより大幅に多いメモリーを使う場合があります。元ファイルは読み取り専用で開きます。設定JSONはmacOSのApplication Support、Linuxの`$XDG_CONFIG_HOME/musha-viewer`（未設定時`~/.config/musha-viewer`）、WindowsのLocalAppDataに保存します。破損または未知バージョンの設定は上書きせず保持します。
+
+画像プレビューの形式対応：
+
+| 形式 | プレビューの動作 |
+| --- | --- |
+| JPEG、PNG、GIF、WebP、BMP | Flutter のデコーダーを使用し、対応するアニメーション GIF・WebP を再生できます。 |
+| HEIC, HEIF | プラットフォームのデコーダーに依存し、表示を保証しません。 |
+| TIFF、PSD | macOS では Flutter でデコードできない場合に ImageIO で最初の統合画像を PNG に変換します。対応はファイルにより異なり、レイヤーは表示しません。この変換は 4000 万画素を目標に縮小し、入出力はそれぞれ 64 MiB 以下です。他のプラットフォームではデコーダーがない場合があります。 |
+| DNG、NEF | 以下の RAW 制限に従い、埋め込み JPEG のみ表示します。 |
+| EPS | macOS では TIFF が埋め込まれた DOS EPS の TIFF プレビューを ImageIO で表示できます。その他の EPS はプレビュー未対応で、PostScript は実行しません。 |
+
+PSD と EPS はファイル選択とフォルダー移動の対象ですが、個々のファイルのデコードは保証しません。メタデータと検証には変換プレビューではなく元ファイルのバイト列を使います。
 
 RAWプレビューはフルRAW現像ではありません。BigTIFFとJPEG以外の埋め込みプレビューは未対応で、機種別の互換性は報告されたファイルに限られ、Leica M11-D DNG 1件のオンラインC2PA検証はMac実機で成功しました。埋め込みJPEGにEXIFの向きがない場合はRAWのTIFFの向きを適用し、抽出したTIFF ICCプロファイルは表示しますが個別には適用しません。Finderとの色・向きの比較とその他のMac実機確認は残っています。詳細は[0.2.0実装メモ](docs/IMPLEMENTATION_0_2_0.md)を参照してください。
 

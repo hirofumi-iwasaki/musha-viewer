@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:musha_viewer/main.dart';
 
@@ -29,6 +30,24 @@ class _VerificationService extends ViewerService {
 }
 
 void main() {
+  testWidgets('inspector has no heading in English or Japanese', (
+    tester,
+  ) async {
+    for (final locale in [const Locale('en'), const Locale('ja')]) {
+      await tester.pumpWidget(
+        MaterialApp(
+          key: UniqueKey(),
+          locale: locale,
+          supportedLocales: const [Locale('en'), Locale('ja')],
+          localizationsDelegates: GlobalMaterialLocalizations.delegates,
+          home: ViewerScreen(controller: ViewerController(ViewerService())),
+        ),
+      );
+      expect(find.text('Inspector'), findsNothing);
+      expect(find.text('インスペクター'), findsNothing);
+    }
+  });
+
   testWidgets('inspector shows only actionable C2PA results', (tester) async {
     Future<void> check(
       Map<String, dynamic>? result,

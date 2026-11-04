@@ -9,8 +9,11 @@ const supportedImageExtensions = <String>{
   'webp',
   'bmp',
   'heic',
+  'heif',
   'tif',
   'tiff',
+  'psd',
+  'eps',
   'dng',
   'nef',
 };
