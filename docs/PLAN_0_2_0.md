@@ -14,7 +14,7 @@ Scope:
 - Current filename and position (for example, 3 / 20).
 - Preserve the v0.2.0+ macOS ARM ZIP release automation already implemented.
 
-Acceptance: synthetic parser fixtures for valid/invalid/bounded RAW inputs; directory sorting and navigation boundaries; stale-result/cache limits; input-focus and zoom/navigation conflicts; regressions for settings and C2PA. Run analysis, Flutter/native tests, Linux Release build and startup in the dedicated container. macOS Sandbox, real trackpad gestures, color comparison with Finder, and actual Leica/Nikon files require device validation by the user. Camera models, NEF compression settings, and representative permission-cleared files are not yet supplied. Do not represent those checks as complete. Video, full RAW editing/development, and other-OS release binaries are outside scope.
+Acceptance: synthetic parser fixtures for valid/invalid/bounded RAW inputs; directory sorting and navigation boundaries; stale-result/cache limits; input-focus and zoom/navigation conflicts; regressions for settings and C2PA. Run analysis, Flutter/native tests, Linux Release build and startup in the dedicated container. macOS Sandbox, real trackpad gestures, color comparison with Finder, and actual Leica/Nikon files require device validation by the user. The user has since reported successful display of particular Leica M11-D and Nikon Z8 files and online C2PA verification of the Leica DNG; broader checks, including NEF compression settings, remain incomplete. Video, full RAW editing/development, and other-OS release binaries are outside scope.
 
 ## 日本語
 
@@ -30,4 +30,4 @@ DNG・NEF表示、元のDNGに対するLeica Content Credentials検証、同一�
 - ファイル名と現在位置（例：3 / 20）の表示。
 - 実装済みのv0.2.0以降のmacOS ARM ZIP自動配布を維持。
 
-受け入れ条件：正常・破損・上限超過の合成RAWフィクスチャ、自然順と移動端点、古い結果とキャッシュ上限、入力フォーカスと拡大／移動競合、設定・C2PA回帰を検証する。専用コンテナーで解析、Flutter／Rustテスト、Linux Releaseビルド・起動を確認する。macOS Sandbox、実トラックパッド、Finderとの色比較、実際のLeica／Nikonファイルはユーザーの実機確認が必要。機種名、NEF圧縮設定、利用許諾のある代表ファイルは未提供であり、確認済みとしない。動画、フルRAW編集・現像、他OSバイナリー配布は対象外。
+受け入れ条件：正常・破損・上限超過の合成RAWフィクスチャ、自然順と移動端点、古い結果とキャッシュ上限、入力フォーカスと拡大／移動競合、設定・C2PA回帰を検証する。専用コンテナーで解析、Flutter／Rustテスト、Linux Releaseビルド・起動を確認する。macOS Sandbox、実トラックパッド、Finderとの色比較、実際のLeica／Nikonファイルはユーザーの実機確認が必要。その後ユーザーから特定の Leica M11-D と Nikon Z8 のファイルの表示成功と Leica DNG のオンライン C2PA 検証成功が報告されたが、NEF 圧縮設定を含む広範な確認は未完了。動画、フルRAW編集・現像、他OSバイナリー配布は対象外。
