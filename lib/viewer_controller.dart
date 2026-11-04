@@ -108,6 +108,11 @@ class ViewerController extends ChangeNotifier {
     sizeOf: (p) => p.bytes.length + (p.raw?.iccProfile?.length ?? 0),
   );
   int? previewOrientation;
+  Future<void>? _directoryDiscovery;
+  Future<void> waitForDirectoryDiscovery() async {
+    await _directoryDiscovery;
+  }
+
   String? directoryStatus;
   String? get currentPath => _currentPath;
   bool get directoryNeedsPermission => directoryStatus == _directoryAccessError;
@@ -262,10 +267,10 @@ class ViewerController extends ChangeNotifier {
     c2paStatus = 'Verifying…';
     directoryStatus = null;
     notifyListeners();
-    Future<void>? discovery;
+    _directoryDiscovery = null;
     if (_directory == null) {
       final request = ++_directorySession;
-      discovery = _discoverDirectory(path, id, request);
+      _directoryDiscovery = _discoverDirectory(path, id, request);
     }
     final info = service
         .fileInfo(path)
@@ -283,7 +288,6 @@ class ViewerController extends ChangeNotifier {
     if (_isRaw(path)) {
       await _openRaw(path, id, cached);
       await info;
-      if (discovery != null) await discovery;
       return;
     }
     try {
@@ -350,7 +354,6 @@ class ViewerController extends ChangeNotifier {
       });
     }
     await info;
-    if (discovery != null) await discovery;
   }
 
   Future<void> _openRaw(String path, int id, _CachedPreview? cached) async {

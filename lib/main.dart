@@ -423,6 +423,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
       if (!mounted || request != selection) return;
       _openSelected(item.path, request);
       await widget.controller.open(item.path);
+      await widget.controller.waitForDirectoryDiscovery();
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

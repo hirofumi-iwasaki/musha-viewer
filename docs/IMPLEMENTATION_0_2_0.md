@@ -55,3 +55,7 @@ The inspector hides C2PA while a result is pending and for `absent` or `unsuppor
 macOS で画像の選択・ドロップ後に親フォルダーへアクセスできない場合は、親を初期位置にした OS のフォルダー選択画面を開きます。キャンセル時は画像を開いたまま、権限を取得しません。手動のフォルダー選択も現在の画像の親から開始します。自動処理は同一の絶対パスを受け付けるため、シンボリックリンクなど別表記で同じ場所を選んだ場合は手動選択が必要になることがあります。既にアクセスできるフォルダーでは自動確認画面を出しません。macOS Sandbox の権限とスコープの寿命は実機で確認が必要です。
 
 インスペクターの C2PA 欄は結果待ち、および `absent`・`unsupported` の場合に非表示とし、存在・外部参照・エラーの場合は表示します。NEF は SDK がサポートする Nikon TIFF の MIME 型を使用します。SDK は元コンテナーのマニフェストと外部参照を調べ、存在しなければ署名・ハッシュ検証の前に不在を返します。上限付き元データの読み取りとネイティブ側へのコピーは引き続き行い、EXIF だけから不在を推測しません。破損や判定不能な入力は SDK へ渡し、検証はオフラインのままです。
+
+On 2026-11-04, `flutter analyze` passed and all 46 Flutter tests passed in the viewer Linux container, including folder-picker cancellation and stale results, inspector visibility and C2PA signed/tampered fixtures. The native C2PA test suite passed all four tests, and a Linux Release build succeeded before the final drop-scope wait adjustment. macOS permission dialogs and security scope still need device testing.
+
+2026-11-04 に viewer 専用 Linux コンテナーで `flutter analyze` が成功し、フォルダー選択のキャンセル・古い結果、インスペクター表示、署名済み・改変済み C2PA を含む Flutter テスト46件すべてが成功しました。C2PA ネイティブテスト4件も成功し、ドロップ時のスコープ待機の最終調整前に Linux Release ビルドが成功しました。macOS の権限画面と security scope は実機確認が必要です。
