@@ -77,7 +77,58 @@ void main() {
       expect(preview.iccProfile, hasLength(4));
       expect(preview.bytes.first, 0xff);
     });
+    test('follows SubIFD pointers with TIFF IFD type in $endian', () async {
+      final original = fixture(endian: endian);
+      final data = Uint8List(120 + original.length - 80);
+      final d = ByteData.sublistView(data);
+      data.setRange(0, 8, original);
+      d.setUint16(8, 1, endian);
+      d.setUint16(10, 0x014a, endian);
+      d.setUint16(12, 13, endian);
+      d.setUint32(14, 1, endian);
+      d.setUint32(18, 32, endian);
+      data.setRange(32, 32 + 54, original, 8);
+      d.setUint32(42, 120, endian);
+      data.setRange(120, data.length, original, 80);
+      expect((await extract(data)).width, 5);
+    });
   }
+  test('combines TIFF JPEG tables with a single JPEG strip', () async {
+    final original = fixture();
+    final data = Uint8List(200 + original.length - 80);
+    data.setRange(0, 8, original);
+    final d = ByteData.sublistView(data);
+    const order = Endian.little;
+    d.setUint16(8, 4, order);
+    void entry(int index, int tag, int type, int count, int value) {
+      final o = 10 + index * 12;
+      d.setUint16(o, tag, order);
+      d.setUint16(o + 2, type, order);
+      d.setUint32(o + 4, count, order);
+      if (type == 3) {
+        d.setUint16(o + 8, value, order);
+      } else {
+        d.setUint32(o + 8, value, order);
+      }
+    }
+    entry(0, 0x103, 3, 1, 7);
+    entry(1, 0x111, 4, 1, 200);
+    entry(2, 0x117, 4, 1, original.length - 80);
+    // An abbreviated tables stream, with one DQT marker segment.
+    final tables = <int>[
+      0xff, 0xd8, 0xff, 0xdb, 0, 67, 0,
+      ...List.filled(64, 1),
+      0xff, 0xd9,
+    ];
+    entry(3, 347, 7, tables.length, 100);
+    data.setRange(100, 100 + tables.length, tables);
+    data.setRange(200, data.length, original, 80);
+    final preview = await extract(data);
+    expect(preview.bytes.sublist(0, 7), tables.sublist(0, 7));
+    expect((preview.width, preview.height), (5, 3));
+    data[105] = 250; // Invalid DQT segment length.
+    await expectLater(extract(data), throwsA(isA<RawPreviewException>()));
+  });
   test(
     'detects JPEG EXIF orientation separately from TIFF orientation',
     () async {
@@ -158,5 +209,27 @@ void main() {
   test('rejects malformed JPEG', () async {
     final bytes = fixture()..[80] = 0;
     await expectLater(extract(bytes), throwsA(isA<RawPreviewException>()));
+  });
+  test('stops at JPEG EOI before nonzero strip padding', () async {
+    final original = fixture();
+    final scan = <int>[
+      0xff, 0xda, 0, 2, // Start of scan.
+      0x12, 0xff, 0, 0xd9, 0xff, 0xd0, 0x34,
+      0xff, 0xd9,
+    ];
+    final padding = <int>[3, 0xff, 0xd9, 5];
+    final data = Uint8List.fromList([
+      ...original.sublist(0, original.length - 2),
+      ...scan,
+      ...padding,
+    ]);
+    ByteData.sublistView(data).setUint32(30, data.length - 80, Endian.little);
+    final preview = await extract(data);
+    expect(preview.bytes.length, data.length - 80 - padding.length);
+    expect(preview.bytes.sublist(preview.bytes.length - 2), [0xff, 0xd9]);
+  });
+  test('does not choose lossless JPEG RAW data as a preview', () async {
+    final data = fixture()..[83] = 0xc3;
+    await expectLater(extract(data), throwsA(isA<RawPreviewException>()));
   });
 }

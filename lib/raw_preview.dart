@@ -51,6 +51,7 @@ class _Reader {
   final int length;
   static const maxPreviewBytes = 64 * 1024 * 1024;
   static const maxProfileBytes = 4 * 1024 * 1024;
+  static const maxJpegTablesBytes = 1024 * 1024;
   static const maxIfds = 128;
   static const maxEntries = 512;
   late Endian endian;
@@ -107,6 +108,8 @@ class _Reader {
           stripOffset,
           stripLength;
       Uint8List? icc;
+      Uint8List? jpegTables;
+      var unsupportedJpegTables = false;
       for (var i = 0; i < count; i++) {
         final o = i * 12;
         final tag = u16(entries, o),
@@ -120,6 +123,18 @@ class _Reader {
               ? Uint8List.fromList(entries.sublist(o + 8, o + 8 + n))
               : await read(u32(entries, o + 8), n);
         }
+        // TIFF Technical Note 2 stores shared JPEG tables as an abbreviated
+        // JPEG stream in tag 347. Only a bounded, single-strip image can be
+        // returned as one standalone JPEG by this reader.
+        if (tag == 347) {
+          if (type != 7 || n < 4 || n > maxJpegTablesBytes) {
+            unsupportedJpegTables = true;
+          } else {
+            jpegTables = n <= 4
+                ? Uint8List.fromList(entries.sublist(o + 8, o + 8 + n))
+                : await read(u32(entries, o + 8), n);
+          }
+        }
         if (!const {
               0x0112,
               0x0103,
@@ -130,7 +145,8 @@ class _Reader {
               0x014a,
               0x8769,
             }.contains(tag) ||
-            (type != 3 && type != 4)) {
+            (type != 3 && type != 4 &&
+                !(type == 13 && (tag == 0x014a || tag == 0x8769)))) {
           continue;
         }
         final size = type == 3 ? 2 : 4;
@@ -174,11 +190,14 @@ class _Reader {
       final next = u32(entries, count * 12);
       if (next != 0) pending.add(next);
       if (jpegOffset != null && jpegLength != null) {
-        candidates.add(_Candidate(jpegOffset, jpegLength, orientation, icc));
-      } else if ((compression == 6 || compression == 7) &&
+        candidates.add(_Candidate(jpegOffset, jpegLength, orientation, icc, null));
+      }
+      if ((compression == 6 || compression == 7) &&
+          !(compression == 7 && unsupportedJpegTables) &&
           stripOffset != null &&
           stripLength != null) {
-        candidates.add(_Candidate(stripOffset, stripLength, orientation, icc));
+        candidates.add(_Candidate(stripOffset, stripLength, orientation, icc,
+            compression == 7 ? jpegTables : null));
       }
     }
     RawPreview? best;
@@ -189,7 +208,22 @@ class _Reader {
           c.size > length - c.offset) {
         continue;
       }
-      final bytes = await read(c.offset, c.size);
+      var bytes = await read(c.offset, c.size);
+      if (c.tables != null) {
+        final tables = c.tables!;
+        if (!_validJpegTables(tables) ||
+            bytes.length < 4 || bytes[0] != 0xff || bytes[1] != 0xd8 ||
+            tables.length + bytes.length - 4 > maxPreviewBytes) {
+          continue;
+        }
+        final combined = Uint8List(tables.length + bytes.length - 4);
+        combined.setRange(0, tables.length - 2, tables);
+        combined.setRange(tables.length - 2, combined.length, bytes, 2);
+        bytes = combined;
+      }
+      final end = _jpegEnd(bytes);
+      if (end == null) continue;
+      if (end != bytes.length) bytes = Uint8List.sublistView(bytes, 0, end);
       final dimensions = _jpegDimensions(bytes);
       if (dimensions == null) continue;
       final orientation = c.orientation ?? rootOrientation;
@@ -218,10 +252,66 @@ class _Reader {
 }
 
 class _Candidate {
-  _Candidate(this.offset, this.size, this.orientation, this.icc);
+  _Candidate(this.offset, this.size, this.orientation, this.icc, this.tables);
   final int offset, size;
   final int? orientation;
   final Uint8List? icc;
+  final Uint8List? tables;
+}
+
+bool _validJpegTables(Uint8List b) {
+  if (b.length < 4 || b[0] != 0xff || b[1] != 0xd8 ||
+      b[b.length - 2] != 0xff || b.last != 0xd9) {
+    return false;
+  }
+  var p = 2;
+  while (p < b.length - 2) {
+    if (b[p++] != 0xff) return false;
+    while (p < b.length - 2 && b[p] == 0xff) { p++; }
+    if (p >= b.length - 2) return false;
+    final marker = b[p++];
+    // DQT, DHT, DAC and DRI are the table and restart markers.
+    if (marker != 0xdb && marker != 0xc4 && marker != 0xcc && marker != 0xdd) {
+      return false;
+    }
+    if (p + 2 > b.length - 2) return false;
+    final size = (b[p] << 8) | b[p + 1];
+    if (size < 2 || size > b.length - 2 - p) return false;
+    p += size;
+  }
+  return p == b.length - 2;
+}
+
+// Walk JPEG markers, including entropy-coded scans, to find the actual EOI.
+// TIFF StripByteCounts may include extra bytes after the JPEG stream.
+int? _jpegEnd(Uint8List b) {
+  if (b.length < 4 || b[0] != 0xff || b[1] != 0xd8) return null;
+  var p = 2;
+  var inScan = false;
+  while (p < b.length) {
+    if (inScan) {
+      while (p < b.length && b[p] != 0xff) { p++; }
+    }
+    if (p >= b.length || b[p++] != 0xff) return null;
+    while (p < b.length && b[p] == 0xff) { p++; }
+    if (p >= b.length) return null;
+    final marker = b[p++];
+    if (inScan && (marker == 0 || (marker >= 0xd0 && marker <= 0xd7))) {
+      continue;
+    }
+    inScan = false;
+    if (marker == 0xd9) return p;
+    if (marker == 0x01) continue;
+    if (marker == 0 || marker == 0xd8 ||
+        (marker >= 0xd0 && marker <= 0xd7) || p + 2 > b.length) {
+      return null;
+    }
+    final size = (b[p] << 8) | b[p + 1];
+    if (size < 2 || size > b.length - p) return null;
+    p += size;
+    if (marker == 0xda) inScan = true;
+  }
+  return null;
 }
 
 (int, int)? _jpegDimensions(Uint8List b) {
@@ -245,11 +335,8 @@ class _Candidate {
     if (p + 2 > b.length) return null;
     final size = (b[p] << 8) | b[p + 1];
     if (size < 2 || p + size > b.length) return null;
-    if ((marker >= 0xc0 && marker <= 0xc3) ||
-        (marker >= 0xc5 && marker <= 0xc7) ||
-        (marker >= 0xc9 && marker <= 0xcb) ||
-        (marker >= 0xcd && marker <= 0xcf)) {
-      if (size < 8) return null;
+    if (marker == 0xc0 || marker == 0xc1 || marker == 0xc2) {
+      if (size < 8 || b[p + 2] != 8) return null;
       final height = (b[p + 3] << 8) | b[p + 4],
           width = (b[p + 5] << 8) | b[p + 6];
       return width > 0 && height > 0 ? (width, height) : null;

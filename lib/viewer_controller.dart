@@ -21,7 +21,6 @@ class MetadataEntry {
 class ViewerService {
   static const maxBytes = 64 * 1024 * 1024;
   static const maxRawBytes = 256 * 1024 * 1024;
-  static const maxPixels = 40 * 1000 * 1000;
 
   Future<List<MetadataEntry>> fileInfo(String path) async {
     final stat = await File(path).stat();
@@ -69,6 +68,33 @@ Future<List<MetadataEntry>> _extractExif(Uint8List bytes) async {
     for (final tag in tags.entries)
       MetadataEntry('EXIF', tag.key, tag.value.printable),
   ];
+}
+
+// Validate that the first frame can be decoded without holding a second
+// full-resolution copy alongside the image used by the viewer.
+Future<({int width, int height})> _validatePreview(Uint8List data) async {
+  final buffer = await ui.ImmutableBuffer.fromUint8List(data);
+  try {
+    final descriptor = await ui.ImageDescriptor.encoded(buffer);
+    try {
+      final dimensions = (width: descriptor.width, height: descriptor.height);
+      final codec = await descriptor.instantiateCodec(
+        targetWidth: 1,
+        targetHeight: 1,
+      );
+      try {
+        final frame = await codec.getNextFrame();
+        frame.image.dispose();
+      } finally {
+        codec.dispose();
+      }
+      return dimensions;
+    } finally {
+      descriptor.dispose();
+    }
+  } finally {
+    buffer.dispose();
+  }
 }
 
 class ViewerController extends ChangeNotifier {
@@ -281,42 +307,18 @@ class ViewerController extends ChangeNotifier {
             },
           );
       try {
-        final buffer = await ui.ImmutableBuffer.fromUint8List(data);
-        try {
-          final descriptor = await ui.ImageDescriptor.encoded(buffer);
-          try {
-            if (descriptor.width * descriptor.height >
-                ViewerService.maxPixels) {
-              throw const FormatException(
-                'Image exceeds the 40 megapixel preview limit',
-              );
-            }
-          } finally {
-            descriptor.dispose();
-          }
-        } finally {
-          buffer.dispose();
-        }
-        if (!_current(id)) return;
-        final codec = await ui.instantiateImageCodec(data);
-        try {
-          final frame = await codec.getNextFrame();
-          final width = frame.image.width, height = frame.image.height;
-          frame.image.dispose();
-          _update(id, () {
-            bytes = data;
-            imageEntries = [
-              MetadataEntry(
-                'Image',
-                'Decoded dimensions',
-                '$width × $height pixels',
-              ),
-            ];
-            loading = false;
-          });
-        } finally {
-          codec.dispose();
-        }
+        final dimensions = await _validatePreview(data);
+        _update(id, () {
+          bytes = data;
+          imageEntries = [
+            MetadataEntry(
+              'Image',
+              'Decoded dimensions',
+              '${dimensions.width} × ${dimensions.height} pixels',
+            ),
+          ];
+          loading = false;
+        });
       } catch (error) {
         _update(id, () {
           previewError = 'Image preview unavailable: $error';
@@ -396,61 +398,39 @@ class ViewerController extends ChangeNotifier {
     try {
       final preview = cached?.raw ?? await service.rawPreview(path);
       if (!_current(id)) return;
-      final buffer = await ui.ImmutableBuffer.fromUint8List(preview.bytes);
-      try {
-        final descriptor = await ui.ImageDescriptor.encoded(buffer);
-        try {
-          if (descriptor.width * descriptor.height > ViewerService.maxPixels) {
-            throw const FormatException(
-              'Image exceeds the 40 megapixel preview limit',
-            );
-          }
-        } finally {
-          descriptor.dispose();
-        }
-      } finally {
-        buffer.dispose();
-      }
-      final codec = await ui.instantiateImageCodec(preview.bytes);
-      try {
-        final frame = await codec.getNextFrame();
-        final width = frame.image.width, height = frame.image.height;
-        frame.image.dispose();
-        _update(id, () {
-          bytes = preview.bytes;
-          previewOrientation = preview.hasJpegExifOrientation
-              ? null
-              : preview.orientation;
-          imageEntries = [
+      final dimensions = await _validatePreview(preview.bytes);
+      _update(id, () {
+        bytes = preview.bytes;
+        previewOrientation = preview.hasJpegExifOrientation
+            ? null
+            : preview.orientation;
+        imageEntries = [
+          MetadataEntry(
+            'Image',
+            'Preview source',
+            'Embedded RAW JPEG (not developed RAW)',
+          ),
+          MetadataEntry(
+            'Image',
+            'Decoded preview dimensions',
+            '${dimensions.width} × ${dimensions.height} pixels',
+          ),
+          if (preview.orientation != null)
             MetadataEntry(
               'Image',
-              'Preview source',
-              'Embedded RAW JPEG (not developed RAW)',
+              'TIFF orientation',
+              '${preview.orientation}',
             ),
-            MetadataEntry(
-              'Image',
-              'Decoded preview dimensions',
-              '$width × $height pixels',
-            ),
-            if (preview.orientation != null)
-              MetadataEntry(
-                'Image',
-                'TIFF orientation',
-                '${preview.orientation}',
-              ),
-            MetadataEntry(
-              'Image',
-              'TIFF ICC profile',
-              preview.iccProfile == null
-                  ? 'Not present or unsupported'
-                  : 'Present; not applied separately',
-            ),
-          ];
-          loading = false;
-        });
-      } finally {
-        codec.dispose();
-      }
+          MetadataEntry(
+            'Image',
+            'TIFF ICC profile',
+            preview.iccProfile == null
+                ? 'Not present or unsupported'
+                : 'Present; not applied separately',
+          ),
+        ];
+        loading = false;
+      });
     } catch (error) {
       _update(id, () {
         previewError = 'Embedded RAW preview unavailable: $error';
