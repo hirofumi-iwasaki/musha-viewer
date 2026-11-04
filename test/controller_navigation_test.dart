@@ -98,4 +98,31 @@ void main() {
       }
     },
   );
+  test(
+    'folder discovery waiter completes after failure and a later open',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'controller_discovery',
+      );
+      final controller = ViewerController(_Service());
+      try {
+        await controller.open('${root.path}/missing/file.jpg');
+        await controller.waitForDirectoryDiscovery().timeout(
+          const Duration(seconds: 5),
+        );
+        expect(controller.directoryNeedsPermission, isTrue);
+        final folder = await Directory('${root.path}/available').create();
+        await File('${folder.path}/a.jpg').writeAsBytes([]);
+        await controller.open('${folder.path}/a.jpg');
+        await controller.waitForDirectoryDiscovery().timeout(
+          const Duration(seconds: 5),
+        );
+        expect(controller.directoryNeedsPermission, isFalse);
+        expect(controller.currentIndex, 0);
+      } finally {
+        controller.dispose();
+        await root.delete(recursive: true);
+      }
+    },
+  );
 }
