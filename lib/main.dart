@@ -228,9 +228,19 @@ class _ViewerAppState extends State<ViewerApp> with WindowListener {
 }
 
 class ViewerScreen extends StatefulWidget {
-  const ViewerScreen({super.key, required this.controller, this.settings});
+  const ViewerScreen({
+    super.key,
+    required this.controller,
+    this.settings,
+    this.directoryPicker,
+    this.filePicker,
+    this.isMacOS,
+  });
   final ViewerController controller;
   final SettingsStore? settings;
+  final Future<String?> Function(String? initialDirectory)? directoryPicker;
+  final Future<XFile?> Function()? filePicker;
+  final bool? isMacOS;
   @override
   State<ViewerScreen> createState() => _ViewerScreenState();
 }
@@ -242,7 +252,8 @@ String? dropRejection(List<DropItem> files) =>
 
 class _ViewerScreenState extends State<ViewerScreen> {
   final transformation = TransformationController();
-  bool picking = false;
+  int activePickers = 0;
+  bool get picking => activePickers > 0;
   bool dragging = false;
   int selection = 0;
   double swipeDistance = 0;
@@ -256,7 +267,71 @@ class _ViewerScreenState extends State<ViewerScreen> {
   Size previewSize = Size.zero;
   bool get zoomed => (transformation.value.entry(0, 0).abs() - 1).abs() > .001;
 
+  String? pendingFolderPath;
+  int? pendingFolderSelection;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_checkFolderAccess);
+  }
+
+  Future<String?> _selectDirectory(String? initialDirectory) =>
+      widget.directoryPicker?.call(initialDirectory) ??
+      getDirectoryPath(initialDirectory: initialDirectory);
+
+  void _checkFolderAccess() {
+    final path = pendingFolderPath;
+    final request = pendingFolderSelection;
+    if (path == null ||
+        request != selection ||
+        widget.controller.currentPath != path ||
+        !widget.controller.directoryNeedsPermission) {
+      return;
+    }
+    pendingFolderPath = null;
+    pendingFolderSelection = null;
+    unawaited(_requestParentFolder(path, request!));
+  }
+
+  Future<void> _requestParentFolder(String path, int request) async {
+    final parent = File(path).parent.absolute.path;
+    setState(() => activePickers++);
+    try {
+      final selected = await _selectDirectory(parent);
+      if (!mounted ||
+          request != selection ||
+          widget.controller.currentPath != path ||
+          selected == null ||
+          Directory(selected).absolute.path != parent) {
+        return;
+      }
+      await widget.controller.authorizeDirectory(selected);
+    } catch (error) {
+      if (mounted &&
+          request == selection &&
+          widget.controller.currentPath == path) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open folder: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => activePickers--);
+    }
+  }
+
+  void _openSelected(String path, int request) {
+    if (widget.isMacOS ?? Platform.isMacOS) {
+      pendingFolderPath = path;
+      pendingFolderSelection = request;
+    }
+    transformation.value = Matrix4.identity();
+  }
+
   void navigate(bool forward) {
+    selection++;
+    pendingFolderPath = null;
+    pendingFolderSelection = null;
     scrollTimer?.cancel();
     scrollHorizontal = scrollVertical = 0;
     transformation.value = Matrix4.identity();
@@ -267,9 +342,12 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   Future<void> pickFolder() async {
     final request = ++selection;
-    setState(() => picking = true);
+    setState(() => activePickers++);
     try {
-      final path = await getDirectoryPath();
+      final currentPath = widget.controller.currentPath;
+      final path = await _selectDirectory(
+        currentPath == null ? null : File(currentPath).parent.absolute.path,
+      );
       if (path != null && mounted && request == selection) {
         await widget.controller.authorizeDirectory(path);
       }
@@ -280,7 +358,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
         );
       }
     } finally {
-      if (mounted) setState(() => picking = false);
+      if (mounted) setState(() => activePickers--);
     }
   }
 
@@ -343,7 +421,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
         }
       }
       if (!mounted || request != selection) return;
-      transformation.value = Matrix4.identity();
+      _openSelected(item.path, request);
       await widget.controller.open(item.path);
     } catch (error) {
       if (mounted) {
@@ -362,6 +440,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   @override
   void dispose() {
+    widget.controller.removeListener(_checkFolderAccess);
     if (widget.settings == null) settings.dispose();
     scrollTimer?.cancel();
     transformation.dispose();
@@ -371,7 +450,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   Future<void> pick() async {
     final request = ++selection;
-    setState(() => picking = true);
+    setState(() => activePickers++);
     try {
       const images = XTypeGroup(
         label: 'Images',
@@ -389,9 +468,11 @@ class _ViewerScreenState extends State<ViewerScreen> {
           'nef',
         ],
       );
-      final file = await openFile(acceptedTypeGroups: [images]);
+      final file =
+          await (widget.filePicker?.call() ??
+              openFile(acceptedTypeGroups: [images]));
       if (file != null && mounted && request == selection) {
-        transformation.value = Matrix4.identity();
+        _openSelected(file.path, request);
         unawaited(widget.controller.open(file.path));
       }
     } catch (error) {
@@ -401,7 +482,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
         );
       }
     } finally {
-      if (mounted) setState(() => picking = false);
+      if (mounted) setState(() => activePickers--);
     }
   }
 
@@ -752,57 +833,59 @@ class _ViewerScreenState extends State<ViewerScreen> {
           final header = <Widget>[
             Text('Inspector', style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 16),
-            Text(
-              'Content Credentials (C2PA)',
-              style: Theme.of(context).textTheme.titleSmall,
-            ),
-            Text(c.c2paStatus),
-            if (c.c2paResult case final result?) ...[
+            if (c.c2paVisibility) ...[
               Text(
-                'Credentials: ${switch (result['status']) {
-                  'present' => 'present',
-                  'absent' => 'not detected',
-                  'remote' => 'remote reference',
-                  _ => 'unknown',
-                }}',
+                'Content Credentials (C2PA)',
+                style: Theme.of(context).textTheme.titleSmall,
               ),
-              Text(
-                'Parsing: ${switch (result['status']) {
-                  'present' => 'completed',
-                  'absent' => 'no embedded manifest found',
-                  'remote' => 'remote manifest not fetched',
-                  'unsupported' => 'unsupported format',
-                  'error' => 'failed',
-                  _ => 'unknown',
-                }}',
-              ),
-              Text('Asset integrity: ${result['integrity'] ?? 'unknown'}'),
-              Text(
-                'Claim integrity: ${result['claim_integrity'] ?? 'unknown'}',
-              ),
-              Text(
-                'SDK validation: ${result['validation_state'] ?? 'unknown'}',
-              ),
-              Text('Signature: ${result['signature'] ?? 'unknown'}'),
-              Text(
-                'Trust: ${result['trust'] ?? 'unknown'} (no trust list configured)',
-              ),
-              const Text('Online lookup: disabled'),
-              if (result['error'] != null)
-                SelectableText('Error: ${result['error']}'),
-              if (result['error_code'] != null)
-                SelectableText('Code: ${result['error_code']}'),
-              Material(
-                color: Colors.transparent,
-                child: ExpansionTile(
-                  title: const Text('Verification details'),
-                  children: [
-                    SelectableText(
-                      const JsonEncoder.withIndent('  ').convert(result),
-                    ),
-                  ],
+              Text(c.c2paStatus),
+              if (c.c2paResult case final result?) ...[
+                Text(
+                  'Credentials: ${switch (result['status']) {
+                    'present' => 'present',
+                    'absent' => 'not detected',
+                    'remote' => 'remote reference',
+                    _ => 'unknown',
+                  }}',
                 ),
-              ),
+                Text(
+                  'Parsing: ${switch (result['status']) {
+                    'present' => 'completed',
+                    'absent' => 'no embedded manifest found',
+                    'remote' => 'remote manifest not fetched',
+                    'unsupported' => 'unsupported format',
+                    'error' => 'failed',
+                    _ => 'unknown',
+                  }}',
+                ),
+                Text('Asset integrity: ${result['integrity'] ?? 'unknown'}'),
+                Text(
+                  'Claim integrity: ${result['claim_integrity'] ?? 'unknown'}',
+                ),
+                Text(
+                  'SDK validation: ${result['validation_state'] ?? 'unknown'}',
+                ),
+                Text('Signature: ${result['signature'] ?? 'unknown'}'),
+                Text(
+                  'Trust: ${result['trust'] ?? 'unknown'} (no trust list configured)',
+                ),
+                const Text('Online lookup: disabled'),
+                if (result['error'] != null)
+                  SelectableText('Error: ${result['error']}'),
+                if (result['error_code'] != null)
+                  SelectableText('Code: ${result['error_code']}'),
+                Material(
+                  color: Colors.transparent,
+                  child: ExpansionTile(
+                    title: const Text('Verification details'),
+                    children: [
+                      SelectableText(
+                        const JsonEncoder.withIndent('  ').convert(result),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ],
             if (settings.warning != null) Text(settings.warning!),
             const Divider(height: 32),

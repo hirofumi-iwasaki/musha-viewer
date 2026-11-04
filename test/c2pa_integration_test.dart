@@ -28,6 +28,26 @@ void main() {
         : false,
   );
   test(
+    'NEF names use the native TIFF handler',
+    () async {
+      final result = await verifyC2pa(
+        Uint8List.fromList([73, 73, 42, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        'original.NEF',
+        libraryPath: library.path,
+      );
+      expect(result['status'], 'absent');
+      final malformed = await verifyC2pa(
+        Uint8List.fromList([0, 1, 2]),
+        'original.nef',
+        libraryPath: library.path,
+      );
+      expect(malformed['status'], 'error');
+    },
+    skip: !(Platform.isLinux || Platform.isMacOS) || !library.existsSync()
+        ? 'Native library not built; build it first to run the integration test.'
+        : false,
+  );
+  test(
     'native verification distinguishes signed and tampered snapshots',
     () async {
       final bytes = await File('native/c2pa/tests/fixtures/signed.jpg')

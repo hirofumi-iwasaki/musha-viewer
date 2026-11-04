@@ -41,3 +41,17 @@ A publicly downloadable [Photography Blog Leica M11 original](https://img.photog
 On 2026-11-04, the viewer-only Linux container using Flutter 3.47.4 resolved locked packages, `flutter analyze` reported no issues, and 16 focused RAW parser, over-40-megapixel, and original-byte/stale-result tests passed. The public M11 extraction check above used Dart 3.13.3. These results do not validate the user's M11-D or Nikon Z8 files or macOS display behavior.
 
 2026-11-04 に viewer 専用 Linux コンテナーと Flutter 3.47.4 でロック済み依存を解決し、`flutter analyze` は問題なし、RAW パーサー・4000万画素超・元データと古い結果に関する対象テスト16件が成功しました。上記の公開 M11 抽出は Dart 3.13.3 で確認しました。これらはユーザーの M11-D・Nikon Z8 ファイルや macOS での表示を検証したものではありません。
+
+The user reported that the revised macOS test build displayed their Nikon Z8 NEF and Leica M11-D DNG successfully. This is a report for those particular files, not a compatibility guarantee for all camera models or compression settings.
+
+ユーザーから、修正版の macOS テストビルドで手元の Nikon Z8 NEF と Leica M11-D DNG が正常に表示されたとの報告がありました。これは当該ファイルについての報告であり、全機種・全圧縮設定の互換性を保証するものではありません。
+
+## Folder access and credential visibility / フォルダー許可と認証情報の表示
+
+On macOS, when opening or dropping a file cannot establish access to its parent folder, the app requests the parent with the native folder picker; cancelling leaves the image open and does not grant access. The manual folder picker also starts at the current image's parent. The automatic fallback accepts the same absolute path; an equivalent path presented differently, such as through a symbolic link, may need a manual folder selection. Existing accessible folder navigation does not trigger this fallback. Actual macOS Sandbox permission and scope lifetime must still be checked on a Mac.
+
+The inspector hides C2PA while a result is pending and for `absent` or `unsupported`, while showing present, remote-reference and error results. NEF now uses the SDK's supported Nikon TIFF MIME type. The SDK inspects the original container for embedded manifests and remote references and returns absence before signature/hash validation. It still reads the bounded original snapshot and copies it into the native verifier; there is no separate speculative EXIF-based absence probe. Malformed and uncertain inputs continue to the SDK rather than being classified absent. Verification remains offline.
+
+macOS で画像の選択・ドロップ後に親フォルダーへアクセスできない場合は、親を初期位置にした OS のフォルダー選択画面を開きます。キャンセル時は画像を開いたまま、権限を取得しません。手動のフォルダー選択も現在の画像の親から開始します。自動処理は同一の絶対パスを受け付けるため、シンボリックリンクなど別表記で同じ場所を選んだ場合は手動選択が必要になることがあります。既にアクセスできるフォルダーでは自動確認画面を出しません。macOS Sandbox の権限とスコープの寿命は実機で確認が必要です。
+
+インスペクターの C2PA 欄は結果待ち、および `absent`・`unsupported` の場合に非表示とし、存在・外部参照・エラーの場合は表示します。NEF は SDK がサポートする Nikon TIFF の MIME 型を使用します。SDK は元コンテナーのマニフェストと外部参照を調べ、存在しなければ署名・ハッシュ検証の前に不在を返します。上限付き元データの読み取りとネイティブ側へのコピーは引き続き行い、EXIF だけから不在を推測しません。破損や判定不能な入力は SDK へ渡し、検証はオフラインのままです。

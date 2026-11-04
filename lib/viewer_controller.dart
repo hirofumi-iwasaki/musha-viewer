@@ -109,6 +109,17 @@ class ViewerController extends ChangeNotifier {
   );
   int? previewOrientation;
   String? directoryStatus;
+  String? get currentPath => _currentPath;
+  bool get directoryNeedsPermission => directoryStatus == _directoryAccessError;
+  static const _directoryAccessError =
+      'Folder access unavailable. Use Authorize folder to navigate adjacent images.';
+  bool get c2paVisibility =>
+      c2paResult != null &&
+          c2paResult!['status'] != 'absent' &&
+          c2paResult!['status'] != 'unsupported' ||
+      c2paResult == null && c2paStatus.startsWith('Verification unavailable') ||
+      c2paResult == null &&
+          c2paStatus.startsWith('Original file verification unavailable');
   int get currentIndex => _directory?.index ?? -1;
   int get imageCount => _directory?.paths.length ?? 0;
   bool get canPrevious => _directory?.previous != null;
@@ -116,11 +127,12 @@ class ViewerController extends ChangeNotifier {
 
   Future<void> authorizeDirectory(String path) async {
     final id = ++_directorySession;
+    final openSession = _session;
     final directory = await DirectoryNavigation.fromDirectory(
       path,
       current: _currentPath,
     );
-    if (_disposed || id != _directorySession) return;
+    if (_disposed || id != _directorySession || openSession != _session) return;
     _directory = directory;
     directoryStatus = directory.paths.isEmpty
         ? 'No supported images in this folder.'
@@ -153,7 +165,7 @@ class ViewerController extends ChangeNotifier {
       _prefetch();
     } catch (_) {
       if (!_current(session) || request != _directorySession) return;
-      directoryStatus = 'Folder access unavailable. Use Authorize folder to navigate adjacent images.';
+      directoryStatus = _directoryAccessError;
       notifyListeners();
     }
   }
@@ -248,11 +260,12 @@ class ViewerController extends ChangeNotifier {
     loading = true;
     c2paResult = null;
     c2paStatus = 'Verifying…';
+    directoryStatus = null;
     notifyListeners();
+    Future<void>? discovery;
     if (_directory == null) {
-      directoryStatus = null;
       final request = ++_directorySession;
-      unawaited(_discoverDirectory(path, id, request));
+      discovery = _discoverDirectory(path, id, request);
     }
     final info = service
         .fileInfo(path)
@@ -270,6 +283,7 @@ class ViewerController extends ChangeNotifier {
     if (_isRaw(path)) {
       await _openRaw(path, id, cached);
       await info;
+      if (discovery != null) await discovery;
       return;
     }
     try {
@@ -336,6 +350,7 @@ class ViewerController extends ChangeNotifier {
       });
     }
     await info;
+    if (discovery != null) await discovery;
   }
 
   Future<void> _openRaw(String path, int id, _CachedPreview? cached) async {
